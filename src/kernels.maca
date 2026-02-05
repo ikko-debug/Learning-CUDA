@@ -163,11 +163,13 @@ T trace(const std::vector<T>& h_input, size_t rows, size_t cols) {
     RUNTIME_CHECK(macaMemset(d_out, 0, sizeof(T)));
 
     traceKernel<T><<< (n + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE >>>(d_input, rows, cols, n, d_out);
-    
+    RUNTIME_CHECK(macaGetLastError());
+    RUNTIME_CHECK(macaDeviceSynchronize());
+
     T h_out;
     RUNTIME_CHECK(macaMemcpy(&h_out, d_out, sizeof(T), macaMemcpyDeviceToHost));
-    macaFree(d_input);
-    macaFree(d_out);
+    RUNTIME_CHECK(macaFree(d_input));
+    RUNTIME_CHECK(macaFree(d_out));
     return h_out;
 }
 
@@ -190,6 +192,7 @@ void flashAttention(const std::vector<T>& h_q, const std::vector<T>& h_k,
     RUNTIME_CHECK(macaMemcpy(d_q, h_q.data(), q_elems * sizeof(T), macaMemcpyHostToDevice));
     RUNTIME_CHECK(macaMemcpy(d_k, h_k.data(), k_elems * sizeof(T), macaMemcpyHostToDevice));
     RUNTIME_CHECK(macaMemcpy(d_v, h_v.data(), k_elems * sizeof(T), macaMemcpyHostToDevice));
+    RUNTIME_CHECK(macaMemset(d_o, 0, q_elems * sizeof(T)));
 
     dim3 grid(batch_size * target_seq_len * query_heads);
     dim3 block(head_dim);
@@ -199,10 +202,15 @@ void flashAttention(const std::vector<T>& h_q, const std::vector<T>& h_k,
     flash_attention_v1_kernel<T><<<grid, block, shared_bytes>>>(
         d_q, d_k, d_v, d_o, batch_size, target_seq_len, src_seq_len, 
         query_heads, kv_heads, head_dim, is_causal, scale);
+    RUNTIME_CHECK(macaGetLastError());
+    RUNTIME_CHECK(macaDeviceSynchronize());
 
     RUNTIME_CHECK(macaMemcpy(h_o.data(), d_o, q_elems * sizeof(T), macaMemcpyDeviceToHost));
 
-    macaFree(d_q); macaFree(d_k); macaFree(d_v); macaFree(d_o);
+    RUNTIME_CHECK(macaFree(d_q));
+    RUNTIME_CHECK(macaFree(d_k));
+    RUNTIME_CHECK(macaFree(d_v));
+    RUNTIME_CHECK(macaFree(d_o));
 }
 
 
