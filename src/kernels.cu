@@ -46,6 +46,9 @@ __device__ __forceinline__ T warpReduceMax(T val) {
 //2.Block Reduce: 在整个 Block 内求和
 template <typename T>
 __device__ __forceinline__ T blockReduceSum(T val) {
+  if (blockDim.x <= warpSize) {
+    return warpReduceSum(val);
+  }
     //静态分配共享内存，用来存放每个 Warp 的总和
     //一个 Block 32 个 Warps
     static __shared__ T shared[32]; 
@@ -213,10 +216,7 @@ __global__ void native_attention_kernel(const T* q, const T* k, const T* v, T* o
 }
 
 template <typename T>
-__global__ void flash_attention_v1_kernel(
-    const T* Q, const T* K, const T* V, T* O,
-    int batch_size, int target_seq_len, int src_seq_len,
-    int query_heads, int kv_heads, int head_dim, bool is_causal, float scale) {
+__global__ void flash_attention_v1_kernel(const T* Q, const T* K, const T* V, T* O,int batch_size, int target_seq_len, int src_seq_len,int query_heads, int kv_heads, int head_dim, bool is_causal, float scale) {
   //每个 Block 处理一个 Query 向量 (1 x head_dim)
   const int q_idx = blockIdx.x;
   const int tid = threadIdx.x; //线程处理 d 维中的一个分量
@@ -246,12 +246,11 @@ __global__ void flash_attention_v1_kernel(
   float l_i = 0.0f;
   float o_i = 0.0f;
 
-  //Shared Memory 存放 K 和 V 的块
+  //Shared Memory 存放 K、V 以及点积结果
   extern __shared__ float s_mem[];
   float* s_k = s_mem;                          //head_dim
   float* s_v = s_mem + head_dim;               //head_dim
-  float* s_dot = s_mem + 2 * head_dim;         //1 float
-  float* s_red = s_mem + 2 * head_dim + 1;     //head_dim
+  float* s_scalar = s_mem + 2 * head_dim;      //1 float
 
   for (int j = 0; j < src_seq_len; ++j) {
     if (is_causal && j > t) {
@@ -266,41 +265,33 @@ __global__ void flash_attention_v1_kernel(
     s_v[tid] = to_float(v_ptr[tid]);
     __syncthreads();
 
-    //计算点积 S = Q * K^T (通用 block 归并，支持非 32 对齐)
+    //计算点积 S = Q * K^T (使用 blockReduceSum 提高精度)
     float score = q_val * s_k[tid];
-    s_red[tid] = score;
-    __syncthreads();
-
-    int n = head_dim;
-    for (int stride = (n + 1) / 2; stride > 0; stride = (stride + 1) / 2) {
-      if (tid < stride) {
-        int other = tid + stride;
-        if (other < n) {
-          s_red[tid] += s_red[other];
-        }
-      }
-      __syncthreads();
-      if (stride == 1) {
-        break;
-      }
-    }
-
+    float dot = blockReduceSum(score);
     if (tid == 0) {
-      s_dot[0] = s_red[0] * scale;
+      s_scalar[0] = dot * scale;
     }
     __syncthreads();
-    float dot = s_dot[0];
+    dot = s_scalar[0];
 
     //Online Softmax 更新
     float m_prev = m_i;
     float l_prev = l_i;
+    
     m_i = fmaxf(m_prev, dot);
     float p_prev = expf(m_prev - m_i);
     float p_curr = expf(dot - m_i);
     l_i = l_prev * p_prev + p_curr;
-    o_i = (o_i * l_prev * p_prev + p_curr * s_v[tid]) / l_i;
+    //o_i = (o_i * l_prev * p_prev + p_curr * s_v[tid]) / l_i;
+    o_i = o_i * p_prev + p_curr * s_v[tid];
 
     __syncthreads();
+  }
+
+  if (l_i > 0.0f) {
+    o_i /= l_i;
+  } else {
+    o_i = 0.0f;
   }
 
   O[q_idx * head_dim + tid] = from_float<T>(o_i);
@@ -388,7 +379,7 @@ void flashAttention(const std::vector<T>& h_q, const std::vector<T>& h_k,
     //Device kernel launch: flash attention v1 (每个 block 处理一个 query 向量)
   dim3 block(head_dim); //一个block处理全部head_dim维度
   dim3 grid(batch_size * target_seq_len * query_heads);
-  size_t shared_bytes = (3 * head_dim + 1) * sizeof(float);
+  size_t shared_bytes = (2 * head_dim + 1) * sizeof(float);
   float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
   flash_attention_v1_kernel<T><<<grid, block, shared_bytes>>>(
     d_q, d_k, d_v, d_o,
