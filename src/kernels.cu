@@ -2,6 +2,9 @@
 #include <cmath>
 #include <vector>
 #include <cuda_fp16.h>
+#include <cuda_runtime.h>
+#include <iostream>
+#include <cassert>
 
 #include "../tester/utils.h"
 
@@ -20,6 +23,8 @@
  * @return The trace (sum of diagonal values) of the matrix.
  */
 #define BLOCK_SIZE 256
+constexpr int Br = 16;
+constexpr int Bc = 16;
 
 //1.Warp Reduce: 在 32 个线程内快速求和 (不需 Shared Memory)
 template <typename T>
@@ -46,9 +51,6 @@ __device__ __forceinline__ T warpReduceMax(T val) {
 //2.Block Reduce: 在整个 Block 内求和
 template <typename T>
 __device__ __forceinline__ T blockReduceSum(T val) {
-  if (blockDim.x <= warpSize) {
-    return warpReduceSum(val);
-  }
     //静态分配共享内存，用来存放每个 Warp 的总和
     //一个 Block 32 个 Warps
     static __shared__ T shared[32]; 
@@ -216,85 +218,155 @@ __global__ void native_attention_kernel(const T* q, const T* k, const T* v, T* o
 }
 
 template <typename T>
-__global__ void flash_attention_v1_kernel(const T* Q, const T* K, const T* V, T* O,int batch_size, int target_seq_len, int src_seq_len,int query_heads, int kv_heads, int head_dim, bool is_causal, float scale) {
-  //每个 Block 处理一个 Query 向量 (1 x head_dim)
-  const int q_idx = blockIdx.x;
-  const int tid = threadIdx.x; //线程处理 d 维中的一个分量
+__global__ void flash_attention_v1_kernel(const T* __restrict__ Q,const T* __restrict__ K,const T* __restrict__ V,T* __restrict__ O,int batch_size,int target_seq_len,int src_seq_len,int query_heads,int kv_heads,int head_dim,int smem_stride,bool is_causal,float scale) {
+  //线程布局: x 维对应列(Bc)，y 维对应行(Br)
+  int tx = threadIdx.x; //Bc 维度
+  int ty = threadIdx.y; //Br 维度
 
-  const int q_vecs = batch_size * target_seq_len * query_heads;
-  if (q_idx >= q_vecs || tid >= head_dim) {
-    return;
+  int batch_idx = blockIdx.z;
+  int head_idx = blockIdx.y;
+  int q_block_idx = blockIdx.x;
+
+  //当前 block 负责的 query 行区间
+  int q_start_idx = q_block_idx * Br;
+  int q_len_local = min(Br, target_seq_len - q_start_idx);
+
+  int kv_head_idx = (head_idx * kv_heads) / query_heads;
+
+  //共享内存布局：Q/K/V/O tiles 使用带 Padding 的 stride
+  extern __shared__ float smem[];
+  float* s_Q = smem;                                  // Br * smem_stride
+  float* s_K = s_Q + Br * smem_stride;                // Bc * smem_stride
+  float* s_V = s_K + Bc * smem_stride;                // Bc * smem_stride
+  float* s_O = s_V + Bc * smem_stride;                // Br * smem_stride
+  float* s_m = s_O + Br * smem_stride;                // Br
+  float* s_l = s_m + Br;                              // Br
+
+  //1 载入 Q tile
+  //使用平铺的循环来支持 coalesced global load
+  int tid = threadIdx.y * blockDim.x + threadIdx.x;
+  int total_threads = blockDim.x * blockDim.y;
+
+  for (int i = tid; i < Br * head_dim; i += total_threads) {
+      int r = i / head_dim;
+      int c = i % head_dim;
+      int global_q = q_start_idx + r;
+      if (r < q_len_local && global_q < target_seq_len) {
+          size_t q_index = ((static_cast<size_t>(batch_idx) * target_seq_len + global_q) * query_heads + head_idx) * head_dim + c;
+          s_Q[r * smem_stride + c] = to_float(Q[q_index]);
+      } else {
+          s_Q[r * smem_stride + c] = 0.0f;
+      }
+      s_O[r * smem_stride + c] = 0.0f;
   }
+  if (tx == 0 && ty < Br) {
+    s_m[ty] = -1e20f;
+    s_l[ty] = 0.0f;
+  }
+  __syncthreads();
 
-  //线性索引 -> (b, t, qh)
-  int tmp = q_idx;
-  int qh = tmp % query_heads;
-  tmp /= query_heads;
-  int t = tmp % target_seq_len;
-  int b = tmp / target_seq_len;
+  for (int j_base = 0; j_base < src_seq_len; j_base += Bc) {
+    //2 逐块加载 K/V tile
+    int kv_len_local = min(Bc, src_seq_len - j_base);
 
-  //GQA: query head -> kv head
-  int kv_h = (qh * kv_heads) / query_heads;
+    for (int i = tid; i < Bc * head_dim; i += total_threads) {
+        int r = i / head_dim;
+        int c = i % head_dim;
+        int global_k = j_base + r;
+        if (r < kv_len_local && global_k < src_seq_len) {
+            size_t k_index = ((static_cast<size_t>(batch_idx) * src_seq_len + global_k) * kv_heads + kv_head_idx) * head_dim + c;
+            s_K[r * smem_stride + c] = to_float(K[k_index]);
+            s_V[r * smem_stride + c] = to_float(V[k_index]);
+        } else {
+            s_K[r * smem_stride + c] = 0.0f;
+            s_V[r * smem_stride + c] = 0.0f;
+        }
+    }
+    __syncthreads();
 
-  const T* q_ptr = Q + q_idx * head_dim;
+    //3 对每个 query 行做在线 softmax 更新并累加输出
+    if (ty < q_len_local) {
+      float score = 0.0f;
+      bool valid_k = (tx < kv_len_local);
+      int global_q_idx = q_start_idx + ty;
+      int global_k_idx = j_base + tx;
 
-  //将当前 Block 负责的 Q 向量加载到寄存器
-  float q_val = to_float(q_ptr[tid]);
+      if (is_causal && global_k_idx > global_q_idx) {
+        valid_k = false;
+      }
 
-  //Online Softmax 统计量
-  float m_i = -INFINITY;
-  float l_i = 0.0f;
-  float o_i = 0.0f;
+      //计算点积得分
+      if (valid_k) {
+        for (int d = 0; d < head_dim; ++d) {
+          score += s_Q[ty * smem_stride + d] * s_K[tx * smem_stride + d];
+        }
+        score *= scale;
+      } else {
+        score = -INFINITY;
+      }
 
-  //Shared Memory 存放 K、V 以及点积结果
-  extern __shared__ float s_mem[];
-  float* s_k = s_mem;                          //head_dim
-  float* s_v = s_mem + head_dim;               //head_dim
-  float* s_scalar = s_mem + 2 * head_dim;      //1 float
+      //wrap维度规约求 max
+      unsigned mask = __activemask();
+      float m_local = score;
+      #pragma unroll
+      for (int offset = 8; offset > 0; offset /= 2) {
+        m_local = fmaxf(m_local, __shfl_xor_sync(mask, m_local, offset));
+      }
 
-  for (int j = 0; j < src_seq_len; ++j) {
-    if (is_causal && j > t) {
-      continue;
+      float p = (score == -INFINITY) ? 0.0f : expf(score - m_local);
+      
+      //规约求和
+      float l_local = p;
+      #pragma unroll
+      for (int offset = 8; offset > 0; offset /= 2) {
+        l_local += __shfl_xor_sync(mask, l_local, offset);
+      }
+
+      float m_prev = s_m[ty];
+      float l_prev = s_l[ty];
+      float m_new = fmaxf(m_prev, m_local);
+      
+      float scale_prev = expf(m_prev - m_new);
+      float scale_curr = expf(m_local - m_new);
+      
+      float l_new = l_prev * scale_prev + l_local * scale_curr;
+
+      if (tx == 0) {
+        s_m[ty] = m_new;
+        s_l[ty] = l_new;
+      }
+
+      //输出更新，使用带填充的步幅
+      for (int d = 0; d < head_dim; ++d) {
+        float v_val = valid_k ? s_V[tx * smem_stride + d] : 0.0f;
+        float pd = p * v_val;
+        
+        #pragma unroll
+        for (int offset = 8; offset > 0; offset /= 2) {
+          pd += __shfl_xor_sync(mask, pd, offset);
+        }
+        
+        if (tx == 0) {
+          float o_val = s_O[ty * smem_stride + d];
+          s_O[ty * smem_stride + d] = o_val * scale_prev + pd * scale_curr;
+        }
+      }
     }
 
-    const T* k_ptr = K + (((b * src_seq_len + j) * kv_heads + kv_h) * head_dim);
-    const T* v_ptr = V + (((b * src_seq_len + j) * kv_heads + kv_h) * head_dim);
-
-    //加载 K 和 V 到 Shared Memory
-    s_k[tid] = to_float(k_ptr[tid]);
-    s_v[tid] = to_float(v_ptr[tid]);
     __syncthreads();
+  }
 
-    //计算点积 S = Q * K^T (使用 blockReduceSum 提高精度)
-    float score = q_val * s_k[tid];
-    float dot = blockReduceSum(score);
-    if (tid == 0) {
-      s_scalar[0] = dot * scale;
+  //4) 归一化并写回输出
+  if (ty < q_len_local) {
+    float denom = s_l[ty];
+    float inv_l = (denom > 0.0f) ? (1.0f / denom) : 0.0f;
+    for (int d = tx; d < head_dim; d += Bc) {
+      float val = s_O[ty * smem_stride + d] * inv_l;
+      int global_q = q_start_idx + ty;
+      size_t o_index = ((static_cast<size_t>(batch_idx) * target_seq_len + global_q) * query_heads + head_idx) * head_dim + d;
+      O[o_index] = from_float<T>(val);
     }
-    __syncthreads();
-    dot = s_scalar[0];
-
-    //Online Softmax 更新
-    float m_prev = m_i;
-    float l_prev = l_i;
-    
-    m_i = fmaxf(m_prev, dot);
-    float p_prev = expf(m_prev - m_i);
-    float p_curr = expf(dot - m_i);
-    l_i = l_prev * p_prev + p_curr;
-    //o_i = (o_i * l_prev * p_prev + p_curr * s_v[tid]) / l_i;
-    o_i = o_i * p_prev + p_curr * s_v[tid];
-
-    __syncthreads();
   }
-
-  if (l_i > 0.0f) {
-    o_i /= l_i;
-  } else {
-    o_i = 0.0f;
-  }
-
-  O[q_idx * head_dim + tid] = from_float<T>(o_i);
 }
 
 
@@ -376,15 +448,21 @@ void flashAttention(const std::vector<T>& h_q, const std::vector<T>& h_k,
   RUNTIME_CHECK(cudaMemcpy(d_v, h_v.data(), v_elems * sizeof(T), cudaMemcpyHostToDevice));
   RUNTIME_CHECK(cudaMemset(d_o, 0, o_elems * sizeof(T)));
 
-    //Device kernel launch: flash attention v1 (每个 block 处理一个 query 向量)
-  dim3 block(head_dim); //一个block处理全部head_dim维度
-  dim3 grid(batch_size * target_seq_len * query_heads);
-  size_t shared_bytes = (2 * head_dim + 1) * sizeof(float);
+  //线程块: (Bc, Br) 形成 [列, 行] 的 tile 计算
+  dim3 block(Bc, Br);
+  int grid_x = (target_seq_len + Br - 1) / Br;
+  dim3 grid(grid_x, query_heads, batch_size);
+  
+  //SMEM Padding: +4 (16字节) 以彻底消除 Bank Conflict
+  int smem_stride = head_dim + 4;
+  
+  //共享内存大小与 kernel 中的 smem 布局保持一致
+  size_t shared_bytes = (Br * smem_stride + Bc * smem_stride + Bc * smem_stride + Br * smem_stride + Br + Br) * sizeof(float);
   float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
   flash_attention_v1_kernel<T><<<grid, block, shared_bytes>>>(
     d_q, d_k, d_v, d_o,
     batch_size, target_seq_len, src_seq_len,
-    query_heads, kv_heads, head_dim, is_causal, scale);
+    query_heads, kv_heads, head_dim, smem_stride, is_causal, scale);
 
   RUNTIME_CHECK(cudaGetLastError());
   RUNTIME_CHECK(cudaDeviceSynchronize());

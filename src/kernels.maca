@@ -6,6 +6,8 @@
 #include "../tester/utils.h"
 
 #define BLOCK_SIZE 256
+constexpr int Br = 16;
+constexpr int Bc = 16;
 
 
 
@@ -24,85 +26,137 @@ __device__ __forceinline__ T blockReduceSum(T val) {
     int lane = threadIdx.x % 32; 
     int wid  = threadIdx.x / 32; 
 
-    val = warpReduceSum(val);
-    if (lane == 0) shared[wid] = val;
-    __syncthreads();
+        const T* __restrict__ Q,
+        const T* __restrict__ K,
+        const T* __restrict__ V,
+        T* __restrict__ O,
+        int batch_size,
+        int target_seq_len,
+        int src_seq_len,
+        int query_heads,
+        int kv_heads,
+        int head_dim,
+        bool is_causal,
+        float scale) {
+        //线程布局: x 维对应列(Bc)，y 维对应行(Br)
+        int tx = threadIdx.x; //Bc 维度
+        int ty = threadIdx.y; //Br 维度
 
-    val = (threadIdx.x < blockDim.x / 32) ? shared[lane] : (T)0;
-    if (wid == 0) val = warpReduceSum(val);
+        int batch_idx = blockIdx.z;
+        int head_idx = blockIdx.y;
+        int q_block_idx = blockIdx.x;
 
-    return val;
-}
+        //当前 block 负责的 query 行区间
+        int q_start_idx = q_block_idx * Br;
+        int q_len_local = min(Br, target_seq_len - q_start_idx);
 
-template <typename T>
-__device__ __forceinline__ float to_float(T v);
+        int kv_head_idx = (head_idx * kv_heads) / query_heads;
 
-template <>
-__device__ __forceinline__ float to_float<float>(float v) { return v; }
+        //共享内存布局：Q tile(Br*D), K tile(Bc*D), V tile(Bc*D), O accum(Br*D), m(Br), l(Br)
+        extern __shared__ float smem[];
+        float* s_Q = smem;                                 //Br * head_dim
+        float* s_K = s_Q + Br * head_dim;                  //Bc * head_dim
+        float* s_V = s_K + Bc * head_dim;                  //Bc * head_dim
+        float* s_O = s_V + Bc * head_dim;                  //Br * head_dim
+        float* s_m = s_O + Br * head_dim;                  //Br
+        float* s_l = s_m + Br;                             //Br
 
-template <>
-__device__ __forceinline__ float to_float<int>(int v) { return (float)v; }
+        //1 载入 Q tile，初始化输出累加器与统计量
+        for (int i = threadIdx.y * blockDim.x + threadIdx.x; i < Br * head_dim; i += blockDim.x * blockDim.y) {
+            int r = i / head_dim;
+            int c = i % head_dim;
+            int global_q = q_start_idx + r;
+            if (r < q_len_local && global_q < target_seq_len) {
+                size_t q_index = ((static_cast<size_t>(batch_idx) * target_seq_len + global_q) * query_heads + head_idx) * head_dim + c;
+                s_Q[r * head_dim + c] = to_float(Q[q_index]);
+            } else {
+                s_Q[r * head_dim + c] = 0.0f;
+            }
+            s_O[r * head_dim + c] = 0.0f;
+        }
+        if (tx == 0 && ty < Br) {
+            s_m[ty] = -1e20f;
+            s_l[ty] = 0.0f;
+        }
+        __syncthreads();
 
-template <>
-__device__ __forceinline__ float to_float<half>(half v) {
-    return __half2float(v);
-}
+        for (int j_base = 0; j_base < src_seq_len; j_base += Bc) {
+            //2 逐块加载 K/V tile
+            int kv_len_local = min(Bc, src_seq_len - j_base);
 
-template <typename T>
-__device__ __forceinline__ T from_float(float v);
+            for (int i = threadIdx.y * blockDim.x + threadIdx.x; i < Bc * head_dim; i += blockDim.x * blockDim.y) {
+                int r = i / head_dim;
+                int c = i % head_dim;
+                int global_k = j_base + r;
+                if (r < kv_len_local && global_k < src_seq_len) {
+                    size_t k_index = ((static_cast<size_t>(batch_idx) * src_seq_len + global_k) * kv_heads + kv_head_idx) * head_dim + c;
+                    s_K[r * head_dim + c] = to_float(K[k_index]);
+                    s_V[r * head_dim + c] = to_float(V[k_index]);
+                } else {
+                    s_K[r * head_dim + c] = 0.0f;
+                    s_V[r * head_dim + c] = 0.0f;
+                }
+            }
+            __syncthreads();
 
-template <>
-__device__ __forceinline__ float from_float<float>(float v) { return v; }
+            //3 对每个 query 行做在线 softmax 更新并累加输出
+            if (tx == 0 && ty < q_len_local) {
+                for (int tk = 0; tk < kv_len_local; ++tk) {
+                    int global_q_idx = q_start_idx + ty;
+                    int global_k_idx = j_base + tk;
+                    if (is_causal && global_k_idx > global_q_idx) {
+                        continue;
+                    }
 
-template <>
-__device__ __forceinline__ int from_float<int>(float v) { return (int)v; }
+                    float dot = 0.0f;
+                    for (int d = 0; d < head_dim; ++d) {
+                        dot += s_Q[ty * head_dim + d] * s_K[tk * head_dim + d];
+                    }
+                    dot *= scale;
 
-template <>
-__device__ __forceinline__ half from_float<half>(float v) {
-    return __float2half(v);
-}
+                    float m_prev = s_m[ty];
+                    float l_prev = s_l[ty];
+                    float m_new = fmaxf(m_prev, dot);
+                    float p_prev = expf(m_prev - m_new);
+                    float p_curr = expf(dot - m_new);
+                    float l_new = l_prev * p_prev + p_curr;
 
+                    for (int d = 0; d < head_dim; ++d) {
+                        s_O[ty * head_dim + d] = s_O[ty * head_dim + d] * p_prev + p_curr * s_V[tk * head_dim + d];
+                    }
 
-template <typename T>
-__global__ void traceKernel(const T* __restrict__ input, size_t rows, size_t cols, size_t n, T* out) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t stride = blockDim.x * gridDim.x;
-    T local_sum = 0;
+                    s_m[ty] = m_new;
+                    s_l[ty] = l_new;
+                }
+            }
 
-    for (size_t i = idx; i < n; i += stride) {
-        local_sum += input[i * cols + i];
-    }
+            __syncthreads();
+        }
 
-    local_sum = blockReduceSum(local_sum);
-
-    if (threadIdx.x == 0) {
-        atomicAdd(out, local_sum);
-    }
-}
-
-template <typename T>
-__global__ void flash_attention_v1_kernel(
-    const T* Q, const T* K, const T* V, T* O,
-    int batch_size, int target_seq_len, int src_seq_len,
-    int query_heads, int kv_heads, int head_dim, bool is_causal, float scale) {
-    
-    const int q_idx = blockIdx.x;
-    const int tid = threadIdx.x;
-
-    if (q_idx >= batch_size * target_seq_len * query_heads || tid >= head_dim) return;
-
-    int tmp = q_idx;
+        //4) 归一化并写回输出
+        if (ty < q_len_local) {
+            float denom = s_l[ty];
+            float inv_l = (denom > 0.0f) ? (1.0f / denom) : 0.0f;
+            for (int d = tx; d < head_dim; d += Bc) {
+                float val = s_O[ty * head_dim + d] * inv_l;
+                int global_q = q_start_idx + ty;
+                size_t o_index = ((static_cast<size_t>(batch_idx) * target_seq_len + global_q) * query_heads + head_idx) * head_dim + d;
+                O[o_index] = from_float<T>(val);
+            }
+        }
     int qh = tmp % query_heads;
     tmp /= query_heads;
     int t = tmp % target_seq_len;
     int b = tmp / target_seq_len;
     int kv_h = (qh * kv_heads) / query_heads;
 
+    //1) 将当前 Block 负责的 Q 向量加载到寄存器
     float q_val = to_float(Q[q_idx * head_dim + tid]);
     float m_i = -INFINITY;
     float l_i = 0.0f;
     float o_i = 0.0f;
 
+    //共享内存布局: K(head_dim) + V(head_dim) + dot(1) + reduction(head_dim)
     extern __shared__ float s_mem[];
     float* s_k = s_mem; 
     float* s_v = s_mem + head_dim; 
@@ -115,10 +169,12 @@ __global__ void flash_attention_v1_kernel(
         const T* k_ptr = K + (((b * src_seq_len + j) * kv_heads + kv_h) * head_dim);
         const T* v_ptr = V + (((b * src_seq_len + j) * kv_heads + kv_h) * head_dim);
 
+        //2) 加载 K 和 V 到 Shared Memory
         s_k[tid] = to_float(k_ptr[tid]);
         s_v[tid] = to_float(v_ptr[tid]);
         __syncthreads();
 
+        //3) 计算点积 S = Q * K^T
         float score = q_val * s_k[tid];
         s_red[tid] = score;
         __syncthreads();
@@ -133,6 +189,7 @@ __global__ void flash_attention_v1_kernel(
         __syncthreads();
 
         float dot = s_dot[0];
+        //4) Online Softmax 更新 + 输出累加
         float m_prev = m_i;
         m_i = fmaxf(m_prev, dot);
         float p_prev = expf(m_prev - m_i);
@@ -144,6 +201,7 @@ __global__ void flash_attention_v1_kernel(
         __syncthreads();
     }
 
+    //5) 写回输出
     O[q_idx * head_dim + tid] = from_float<T>(o_i);
 }
 
@@ -194,9 +252,12 @@ void flashAttention(const std::vector<T>& h_q, const std::vector<T>& h_k,
     RUNTIME_CHECK(macaMemcpy(d_v, h_v.data(), k_elems * sizeof(T), macaMemcpyHostToDevice));
     RUNTIME_CHECK(macaMemset(d_o, 0, q_elems * sizeof(T)));
 
-    dim3 grid(batch_size * target_seq_len * query_heads);
-    dim3 block(head_dim);
-    size_t shared_bytes = (3 * head_dim + 1) * sizeof(float);
+    //线程块: (Bc, Br) 形成 [列, 行] 的 tile 计算
+    dim3 block(Bc, Br);
+    int grid_x = (target_seq_len + Br - 1) / Br;
+    dim3 grid(grid_x, query_heads, batch_size);
+    //共享内存大小与 kernel 中的 smem 布局保持一致
+    size_t shared_bytes = (Br * head_dim + Bc * head_dim + Bc * head_dim + Br * head_dim + Br + Br) * sizeof(float);
     float scale = 1.0f / sqrtf((float)head_dim);
 
     flash_attention_v1_kernel<T><<<grid, block, shared_bytes>>>(
