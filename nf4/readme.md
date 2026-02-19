@@ -39,3 +39,18 @@ __device__ static float nf4_dequantization_lut[16] = {
     1.0f                   // 0b1111
 };
 ```
+bitsandbytes使用device，考虑是否使用constant
+| 维度      | **device** static | **constant**      |
+| ------- | ----------------- | ----------------- |
+| 存储位置    | Global Memory     | Constant Memory   |
+| 缓存      | L2 / L1           | 专用 Constant Cache |
+| Warp 广播 | 无              |  有               |
+| 访问延迟    | 高                 | 低                 |
+| 适合      | 普通全局数据            | 查表 / 常量           |
+使用constant先。
+### host逻辑
+1.输入解析，读取二进制文件
+2.内存规划
+3.数据加载，分配显存
+4.启动kernel
+5.记录性能，写入数据

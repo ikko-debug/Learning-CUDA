@@ -7,7 +7,12 @@
                 "/usr/local/cuda-12.8/include"
             ],
             "defines": [],
-            "compilerPath": "/usr/bin/gcc",
+            "compilerPath": "/usr/local/cuda-12.8/bin/nvcc",
+            "compilerArgs": [
+                "-x",
+                "cu",
+                "-std=c++17"
+            ],
             "cStandard": "c17",
             "cppStandard": "gnu++17",
             "intelliSenseMode": "linux-gcc-x64"
