@@ -1,4 +1,17 @@
 
+## NF4反量化
+权重 = NF4表值 × (一级scale × 二级scale) + offset
+scale = code2[ absmax_q[block] ] × absmax2[group]
+w =
+  NF4_TABLE[q]
+× code2[ absmax_q[block] ]
+× absmax2[group]
++ offset
+关联关系：
+Group (16384 weights)
+ └── 256 Blocks
+      └── 64 weights
+           └── 2 per byte
 ## 构造标准测试集
 
 
@@ -54,3 +67,10 @@ bitsandbytes使用device，考虑是否使用constant
 3.数据加载，分配显存
 4.启动kernel
 5.记录性能，写入数据
+### device逻辑
+1. 全局一维线程索引
+2. 读取这 1 个字节，并解包成两个 4-bit 索引
+3. 计算当前字节属于哪一个量化 Block 和 Group
+4. 暴力从全局内存 (Global Memory) 读取双重量化参数
+5. 结合 NF4 查表，计算真实的浮点权重
+6. 最朴素的分别写回 (没有使用 Union 向量化合并写入)

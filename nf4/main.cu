@@ -41,6 +41,50 @@ void checkCuda(cudaError_t result, const char *func, const char *file, int line)
 }
 #define CHECK_CUDA(val) checkCuda((val), #val, __FILE__, __LINE__)
 
+__global__ void nf4_decode_kernel_native(
+    const uint8_t* __restrict__ packed_weights,
+    const uint8_t* __restrict__ absmax_q,
+    const half* __restrict__ absmax2,
+    const half* __restrict__ code2,
+    const float offset, // 通常为 0
+    __nv_bfloat16* __restrict__ output,
+    int64_t num_elements,
+    int blocksize
+) {
+    // 1. 全局一维线程索引
+    // 每个线程负责 1 个字节（即 2 个 4-bit 权重）
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total_bytes = num_elements / 2;
+
+    // 边界检查：多余的线程直接退出
+    if (tid >= total_bytes) return;
+
+    // 2. 读取这 1 个字节，并解包成两个 4-bit 索引
+    uint8_t packed = packed_weights[tid];
+    uint8_t idx1 = packed & 0x0F;
+    uint8_t idx2 = (packed >> 4) & 0x0F;
+
+    // 3. 计算当前字节属于哪一个量化 Block 和 Group
+    // 每一个 Block 包含 blocksize 个权重，即 blocksize / 2 个字节
+    int bytes_per_block = blocksize / 2; 
+    int block_id = tid / bytes_per_block; // 当前 byte 属于第几个 64-weight block
+    int group_id = block_id / 256; // bitsandbytes 默认每组 256 个 block，256 个 block 共享一个 absmax2
+
+    // 4. 暴力从全局内存 (Global Memory) 读取双重量化参数
+    float a2 = __half2float(absmax2[group_id]);   // 读取二级缩放
+    uint8_t qa = absmax_q[block_id];              // 读取一级缩放索引
+    float c2 = __half2float(code2[qa]);           // 查码表解码一级缩放
+    float real_absmax = c2 * a2;                  // 计算最终缩放因子
+
+    // 5. 结合 NF4 查表，计算真实的浮点权重
+    float w1_fp32 = NF4_LUT[idx1] * real_absmax + offset;
+    float w2_fp32 = NF4_LUT[idx2] * real_absmax + offset;
+
+    // 6. 最朴素的分别写回 (没有使用 Union 向量化合并写入)
+    output[tid * 2]     = __float2bfloat16(w1_fp32);
+    output[tid * 2 + 1] = __float2bfloat16(w2_fp32);
+}
+
 __global__ void nf4_decode_kernel(
     const uint8_t* __restrict__ packed_weights,
     const uint8_t* __restrict__ absmax_q,
@@ -51,9 +95,8 @@ __global__ void nf4_decode_kernel(
     int64_t num_elements,
     int blocksize
 ) {
+
 }
-
-
 
 
 
