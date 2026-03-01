@@ -3,7 +3,7 @@ import numpy as np
 import os
 import struct
 
-def check_mae(output_dir="data", cuda_output_file="output_cuda.bin"):
+def check_mae(output_dir="nf4/data", cuda_output_file="output_cuda.bin"):
     truth_file = os.path.join(output_dir, "ground_truth.bin")
     input_file = os.path.join(output_dir, "weight_data.bin")
     

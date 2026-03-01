@@ -4,7 +4,7 @@ import struct
 import os
 import numpy as np
 
-def generate_inputs(rows=4096, cols=4096, blocksize=64, output_dir="data", compute_type="bf16"):
+def generate_inputs(rows=4096, cols=4096, blocksize=64, output_dir="nf4/data", compute_type="bf16"):
     os.makedirs(output_dir, exist_ok=True)
     
     compute_type = compute_type.lower()
@@ -39,11 +39,22 @@ def generate_inputs(rows=4096, cols=4096, blocksize=64, output_dir="data", compu
     # 4. 提取双重量化参数 (为了写入 input bin 文件)
     # bitsandbytes 的 QuantState 结构解析:
     # - absmax: 一级量化因子 (已被二级量化，uint8)
-    # - nested_quant_state: 二级量化参数
+    # - nested quant state: 兼容 nested_quant_state / state2
     absmax_q = quant_state.absmax.to(torch.uint8)  # uint8
-    nested_state = quant_state.nested_quant_state
-    absmax2 = nested_state.absmax # float32 (需转 float16)
-    code2 = nested_state.code     # float32 (需转 float16)
+    nested_state = getattr(quant_state, "nested_quant_state", None)
+    if nested_state is None:
+        nested_state = getattr(quant_state, "state2", None)
+    if nested_state is None:
+        raise RuntimeError(
+            "Double-quantization state not found. "
+            "Please ensure bitsandbytes supports compress_statistics=True "
+            "and provides nested quantization fields."
+        )
+    absmax2 = nested_state.absmax  # float32 (需转 float16)
+    code2 = nested_state.code      # float32 (需转 float16)
+    offset = getattr(quant_state, "offset", 0.0)
+    if isinstance(offset, torch.Tensor):
+        offset = float(offset.item())
     
     # 5. 写入题目要求的二进制输入文件 (weight.bin)
     input_path = os.path.join(output_dir, "weight_data.bin")
@@ -60,8 +71,8 @@ def generate_inputs(rows=4096, cols=4096, blocksize=64, output_dir="data", compu
         f.write(absmax2.to(torch.float16).cpu().numpy().tobytes())
         # code2 (float16)
         f.write(code2.to(torch.float16).cpu().numpy().tobytes())
-        # offset (float32, bnb 默认为 0)
-        f.write(struct.pack("f", 0.0))
+        # offset (float32)
+        f.write(struct.pack("f", float(offset)))
         
     print(f"-> Input file saved to: {input_path}")
     
@@ -71,9 +82,11 @@ def generate_inputs(rows=4096, cols=4096, blocksize=64, output_dir="data", compu
         # 保存为纯二进制流 (row-major, bf16/fp16)
         if compute_type == "bf16":
             ref_out = ref_output.to(torch.bfloat16)
+            ref_bytes = ref_out.view(torch.int16).cpu().numpy().tobytes()
         else:
             ref_out = ref_output.to(torch.float16)
-        f.write(ref_out.cpu().numpy().tobytes())
+            ref_bytes = ref_out.cpu().numpy().tobytes()
+        f.write(ref_bytes)
     
     print(f"-> Ground truth saved to: {truth_path}")
 
