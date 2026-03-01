@@ -70,7 +70,7 @@ __global__ void nf4_decode_kernel_native(
     int block_id = tid / bytes_per_block; // 当前 byte 属于第几个 64-weight block
     int group_id = block_id / 256; // bitsandbytes 默认每组 256 个 block，256 个 block 共享一个 absmax2
 
-    // 4. 暴力从全局内存 (Global Memory) 读取双重量化参数
+    // 4. 从全局内存 (Global Memory) 读取双重量化参数
     float a2 = __half2float(absmax2[group_id]);   // 读取二级缩放
     uint8_t qa = absmax_q[block_id];              // 读取一级缩放索引
     float c2 = __half2float(code2[qa]);           // 查码表解码一级缩放
@@ -80,7 +80,7 @@ __global__ void nf4_decode_kernel_native(
     float w1_fp32 = NF4_LUT[idx1] * real_absmax + offset;
     float w2_fp32 = NF4_LUT[idx2] * real_absmax + offset;
 
-    // 6. 最朴素的分别写回 (没有使用 Union 向量化合并写入)
+    // 6. 最朴素的分别写回 
     output[tid * 2]     = __float2bfloat16(w1_fp32);
     output[tid * 2 + 1] = __float2bfloat16(w2_fp32);
 }
@@ -162,8 +162,30 @@ int main(int argc, char** argv) {
 
 // 4. 启动 CUDA Kernel
     dim3 blockDim(256);
-    dim3 gridDim(num_groups);
-    // 这里的 kernel 函数需要你来实现，函数名可以自定义
+    dim3 blockDim(256);
+    int64_t total_bytes = (num_elements + 1) / 2;
+    int64_t total_words = (total_bytes + 15) / 16;
+    int sm_count = 0;
+    CHECK_CUDA(cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, 0));
+    int max_active_blocks = 0;
+    CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &max_active_blocks,
+        nf4_decode_kernel,
+        blockDim.x,
+        0));
+    int grid_x = sm_count * max_active_blocks;
+    int64_t max_grid = (total_words + blockDim.x - 1) / blockDim.x;
+    if (grid_x > max_grid) {
+        grid_x = static_cast<int>(max_grid);
+    }
+    if (grid_x < 1) {
+        grid_x = 1;
+    }
+    dim3 gridDim(grid_x);
+    std::cout << "SM count: " << sm_count
+              << ", max active blocks/SM: " << max_active_blocks
+              << ", grid_x: " << grid_x << std::endl;
+    int group_size = static_cast<int>((num_blocks + num_groups - 1) / num_groups);
     // kernel 函数需要完成 NF4 解码的核心计算逻辑
     // 计时事件
     cudaEvent_t start, stop;

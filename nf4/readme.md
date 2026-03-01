@@ -12,6 +12,60 @@ Group (16384 weights)
  └── 256 Blocks
       └── 64 weights
            └── 2 per byte
+## bitsandbytes参考实现
+```shell
+source /data/shared/miniconda3/etc/profile.d/conda.sh && conda activate cuda && python - <<'PY'
+import torch
+import bitsandbytes as bnb
+
+rows, cols, blocksize = 4096, 4096, 64
+
+# Generate data
+x = torch.randn(rows, cols, device='cuda', dtype=torch.bfloat16)
+packed, qstate = bnb.functional.quantize_4bit(
+    x,
+    blocksize=blocksize,
+    quant_type='nf4',
+    compress_statistics=True
+)
+
+# Warmup
+for _ in range(5):
+    y = bnb.functional.dequantize_4bit(packed, qstate, quant_type='nf4', blocksize=blocksize)
+
+torch.cuda.synchronize()
+
+# Timing
+iters = 100
+start = torch.cuda.Event(enable_timing=True)
+stop = torch.cuda.Event(enable_timing=True)
+start.record()
+for _ in range(iters):
+    y = bnb.functional.dequantize_4bit(packed, qstate, quant_type='nf4', blocksize=blocksize)
+stop.record()
+stop.synchronize()
+
+ms = start.elapsed_time(stop) / iters
+
+# Approx bandwidth
+num_elements = rows * cols
+size_packed = num_elements // 2
+num_blocks = (num_elements + blocksize - 1) // blocksize
+num_groups = (num_blocks + 255) // 256
+size_absmax_q = num_blocks
+size_absmax2 = num_groups * 2
+size_code2 = 256 * 2
+size_out = num_elements * 2
+
+total_bytes = size_packed + size_absmax_q + size_absmax2 + size_code2 + size_out
+bandwidth = total_bytes / (ms / 1000.0) / 1e9
+
+print(f"bitsandbytes dequantize_4bit: {ms:.6f} ms")
+print(f"Approx bandwidth: {bandwidth:.2f} GB/s")
+PY
+```
+时间：0.083885 ms
+近似带宽：503.16 GB/s
 ## 构造标准测试集
 
 
