@@ -1,1 +1,19 @@
 .venv/
+
+# CUDA / C++ build artifacts
+*.o
+*.obj
+*.so
+*.a
+*.out
+*.bin
+
+# Local executable built in nf4
+nf4/mainla
+
+# Root-level local executables
+/check_ncu
+/test_kernels
+
+# Generated data
+nf4/data/

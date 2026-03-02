@@ -16,6 +16,7 @@ PLATFORM_DEFINE ?= -DPLATFORM_NVIDIA
 STUDENT_SUFFIX  := cu
 CFLAGS          := -std=c++17 -O0
 EXTRA_LIBS     	:= 
+CUDA_DEVICE     ?= 7
 
 # Compiler & Tester object selection based on PLATFORM
 ifeq ($(PLATFORM),nvidia)
@@ -65,7 +66,7 @@ VERBOSE_ARG := $(if $(filter true True TRUE, $(VERBOSE)), $(TEST_VERBOSE_FLAG), 
 # -------------------------------
 # Phony Targets
 # -------------------------------
-.PHONY: all build run clean
+.PHONY: all build run clean nf4
 
 # Default target: Build + run tests (non-verbose)
 all: build run
@@ -76,18 +77,29 @@ build: $(TARGET)
 # Run target: Execute tests (supports `VERBOSE=true` for verbose output)
 run: $(TARGET)
 	@echo "=== Running tests (output from $(STUDENT_OBJ)) ==="
+	@echo "=== CUDA_VISIBLE_DEVICES=$(CUDA_DEVICE) ==="
 	@# Show verbose mode status (friendly for users)
 	@if [ -n "$(VERBOSE_ARG)" ]; then \
 	    echo "=== Verbose mode: Enabled (using '$(TEST_VERBOSE_FLAG)') ==="; \
 	else \
 	    echo "=== Verbose mode: Disabled ==="; \
 	fi
-	./$(TARGET) $(VERBOSE_ARG)
+	CUDA_VISIBLE_DEVICES=$(CUDA_DEVICE) ./$(TARGET) $(VERBOSE_ARG)
 
 # Clean target: Delete temporary files (executable + src object)
 clean:
 	@echo "=== Cleaning temporary files ==="
 	rm -f $(TARGET) $(STUDENT_OBJ)
+
+# NF4 one-command pipeline: compile + run + verify
+nf4:
+	@echo "=== [NF4] Compiling nf4/mainla.cu ==="
+	/usr/local/cuda/bin/nvcc -O3 -std=c++17 -arch=sm_80 nf4/mainla.cu -o nf4/mainla
+	@echo "=== [NF4] Running nf4/mainla ==="
+	@echo "=== CUDA_VISIBLE_DEVICES=$(CUDA_DEVICE) ==="
+	CUDA_VISIBLE_DEVICES=$(CUDA_DEVICE) ./nf4/mainla
+	@echo "=== [NF4] Verifying MAE ==="
+	CUDA_VISIBLE_DEVICES=$(CUDA_DEVICE) python nf4/verify_mae.py
 
 # -------------------------------
 # Dependency Rules (Core Logic)

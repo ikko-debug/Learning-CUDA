@@ -3,7 +3,7 @@ import numpy as np
 import os
 import struct
 
-def check_mae(output_dir="nf4/data", cuda_output_file="output_cuda.bin"):
+def check_mae(output_dir="nf4/data", cuda_output_file="nf4/data/output.bin"):
     truth_file = os.path.join(output_dir, "ground_truth.bin")
     input_file = os.path.join(output_dir, "weight_data.bin")
     
@@ -25,13 +25,29 @@ def check_mae(output_dir="nf4/data", cuda_output_file="output_cuda.bin"):
     # 将字节流转为 Tensor
     # 注意：Python 的 torch.frombuffer 可能会由于字节对齐问题报错，这里使用 numpy view 变通
     # (由于 numpy 无 bf16，我们假设文件存储的是原生字节，用 int16 读取再转 torch.bfloat16)
-    truth_np = np.frombuffer(truth_bytes, dtype=np.int16).reshape(rows, cols)
+    truth_np = np.frombuffer(truth_bytes, dtype=np.int16).copy().reshape(rows, cols)
     truth_tensor = torch.from_numpy(truth_np).view(torch.bfloat16).float() # 转为 float32 用于计算 MAE
     
     # 3. 读取你的 CUDA Kernel 输出
-    cuda_path = cuda_output_file
-    if not os.path.exists(cuda_path):
-        print(f"Error: CUDA output file not found at {cuda_path}")
+    candidates = [
+        cuda_output_file,
+        os.path.join(output_dir, cuda_output_file),
+        os.path.join(output_dir, "output.bin"),
+        "output.bin",
+    ]
+    unique_candidates = []
+    for path in candidates:
+        if path not in unique_candidates:
+            unique_candidates.append(path)
+
+    cuda_path = None
+    for path in unique_candidates:
+        if os.path.exists(path):
+            cuda_path = path
+            break
+
+    if cuda_path is None:
+        print(f"Error: CUDA output file not found. Tried: {unique_candidates}")
         return
 
     with open(cuda_path, "rb") as f:
@@ -43,7 +59,7 @@ def check_mae(output_dir="nf4/data", cuda_output_file="output_cuda.bin"):
         print(f"Error: Output size mismatch! Expected {expected_size}, got {len(cuda_bytes)}")
         return
 
-    cuda_np = np.frombuffer(cuda_bytes, dtype=np.int16).reshape(rows, cols)
+    cuda_np = np.frombuffer(cuda_bytes, dtype=np.int16).copy().reshape(rows, cols)
     cuda_tensor = torch.from_numpy(cuda_np).view(torch.bfloat16).float()
     
     # 4. 计算 MAE (Mean Absolute Error)
@@ -66,5 +82,4 @@ def check_mae(output_dir="nf4/data", cuda_output_file="output_cuda.bin"):
         print(f"❌ FAIL: MAE ({mae:.6f}) exceeds threshold ({threshold})")
 
 if __name__ == "__main__":
-    # 假设你的 CUDA 程序输出文件名为 output.bin
-    check_mae(cuda_output_file="output.bin")
+    check_mae()

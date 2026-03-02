@@ -18,7 +18,7 @@ source /data/shared/miniconda3/etc/profile.d/conda.sh && conda activate cuda && 
 import torch
 import bitsandbytes as bnb
 
-rows, cols, blocksize = 4096, 4096, 64
+rows, cols, blocksize = 16384, 16384, 64
 
 # Generate data
 x = torch.randn(rows, cols, device='cuda', dtype=torch.bfloat16)
@@ -300,3 +300,12 @@ __shared__ float s_LUT[16];
     __syncthreads();
 ```
 搬到 SM（流处理器）内部极其昂贵、速度极快的 Shared Memory（共享内存）中。
+### 更改Shape: 16384x16384, Blocksize: 64
+SM count: 108, max active blocks/SM: 8, grid_x: 864
+Kernel Time: 0.968552 ms
+Effective Bandwidth (approx): 697.243 GB/s
+------------------------------
+MAE (Mean Absolute Error): 0.000017
+Max Error:                 0.031250
+------------------------------
+✅ PASS: MAE (0.000017) is within threshold (0.01)
