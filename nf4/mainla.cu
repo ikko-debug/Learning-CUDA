@@ -5,6 +5,7 @@
 #include <fstream>
 #include <vector>
 #include <string>
+#include <cstring>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -41,6 +42,34 @@ void checkCuda(cudaError_t result, const char *func, const char *file, int line)
     }
 }
 #define CHECK_CUDA(val) checkCuda((val), #val, __FILE__, __LINE__)
+
+template <typename T>
+__device__ __forceinline__ T float_to_out(float v);
+
+template <>
+__device__ __forceinline__ __nv_bfloat16 float_to_out<__nv_bfloat16>(float v) {
+    return __float2bfloat16(v);
+}
+
+template <>
+__device__ __forceinline__ half float_to_out<half>(float v) {
+    return __float2half(v);
+}
+
+template <typename T>
+__device__ __forceinline__ uint32_t pack_pair_to_u32(float v1, float v2);
+
+template <>
+__device__ __forceinline__ uint32_t pack_pair_to_u32<__nv_bfloat16>(float v1, float v2) {
+    __nv_bfloat162 packed = __floats2bfloat162_rn(v1, v2);
+    return *reinterpret_cast<uint32_t*>(&packed);
+}
+
+template <>
+__device__ __forceinline__ uint32_t pack_pair_to_u32<half>(float v1, float v2) {
+    half2 packed = __floats2half2_rn(v1, v2);
+    return *reinterpret_cast<uint32_t*>(&packed);
+}
 
 // __global__ void nf4_decode_kernel_native(
 //     const uint8_t* __restrict__ packed_weights,
@@ -92,13 +121,14 @@ void checkCuda(cudaError_t result, const char *func, const char *file, int line)
 //     }
 // }
 
+template <typename OutT>
 __global__ void nf4_decode_kernel(
     const uint4* __restrict__ packed_weights,
     const uint8_t* __restrict__ absmax_q,
     const half* __restrict__ absmax2,
     const half* __restrict__ code2,
     const float offset,
-    __nv_bfloat16* __restrict__ output,
+    OutT* __restrict__ output,
     int64_t num_elements,
     int blocksize,
     int group_size
@@ -139,8 +169,7 @@ __global__ void nf4_decode_kernel(
                 float v1 = s_LUT[p >> 4] * real_absmax;
                 float v2 = s_LUT[p & 0x0F] * real_absmax;
                 // 直接合成 bf162 并转为 uint32，存入 uint4 的不同分量
-                __nv_bfloat162 packed_bf = __floats2bfloat162_rn(v1, v2);
-                uint32_t u32_val = *reinterpret_cast<uint32_t*>(&packed_bf);
+                uint32_t u32_val = pack_pair_to_u32<OutT>(v1, v2);
                 
                 if(i==0) local_res.x = u32_val;
                 else if(i==1) local_res.y = u32_val;
@@ -168,10 +197,10 @@ __global__ void nf4_decode_kernel(
                 float v2 = s_LUT[p & 0x0F] * real_absmax;
                 int64_t out_idx = byte_idx * 2;
                 if (out_idx < num_elements) {
-                    output[out_idx] = __float2bfloat16(v1);
+                    output[out_idx] = float_to_out<OutT>(v1);
                 }
                 if (out_idx + 1 < num_elements) {
-                    output[out_idx + 1] = __float2bfloat16(v2);
+                    output[out_idx + 1] = float_to_out<OutT>(v2);
                 }
             }
         }
@@ -182,6 +211,23 @@ int main(int argc, char** argv) {
 //     1.输入解析，读取二进制文件
     std::string input_file = "nf4/data/weight_data.bin";
     std::string output_file = "nf4/data/output.bin";
+    enum class OutputType { BF16, FP16 };
+    OutputType output_type = OutputType::BF16;
+    if (argc >= 2) {
+        if (std::strcmp(argv[1], "bf16") == 0) {
+            output_type = OutputType::BF16;
+            output_file = "nf4/data/output_bf16.bin";
+        } else if (std::strcmp(argv[1], "fp16") == 0) {
+            output_type = OutputType::FP16;
+            output_file = "nf4/data/output_fp16.bin";
+        } else {
+            std::cerr << "Usage: " << argv[0] << " [bf16|fp16] [output_file]" << std::endl;
+            return 1;
+        }
+    }
+    if (argc >= 3) {
+        output_file = argv[2];
+    }
     std::ifstream infile(input_file, std::ios::binary);
     if (!infile) {
         char cwd[4096];
@@ -251,13 +297,18 @@ int main(int argc, char** argv) {
     uint8_t* d_absmax_q = nullptr;
     half* d_absmax2 = nullptr;
     half* d_code2 = nullptr;
-    __nv_bfloat16 *d_output;
+    __nv_bfloat16 *d_output_bf16 = nullptr;
+    half *d_output_fp16 = nullptr;
 
     CHECK_CUDA(cudaMalloc(&d_packed, size_packed_padded));
     CHECK_CUDA(cudaMalloc(&d_absmax_q, size_absmax_q));
     CHECK_CUDA(cudaMalloc(&d_absmax2, size_absmax2));
     CHECK_CUDA(cudaMalloc(&d_code2, size_code2));
-    CHECK_CUDA(cudaMalloc(&d_output, num_elements * sizeof(__nv_bfloat16)));
+    if (output_type == OutputType::BF16) {
+        CHECK_CUDA(cudaMalloc(&d_output_bf16, num_elements * sizeof(__nv_bfloat16)));
+    } else {
+        CHECK_CUDA(cudaMalloc(&d_output_fp16, num_elements * sizeof(half)));
+    }
     CHECK_CUDA(cudaMemcpy(d_packed, h_packed.data(), size_packed_padded, cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(d_absmax_q, h_absmax_q.data(), size_absmax_q, cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(d_absmax2, h_absmax2.data(), size_absmax2, cudaMemcpyHostToDevice));
@@ -272,11 +323,19 @@ int main(int argc, char** argv) {
     int sm_count = 0;
     CHECK_CUDA(cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, 0));
     int max_active_blocks = 0;
-    CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &max_active_blocks,
-        nf4_decode_kernel,
-        blockDim.x,
-        0));
+    if (output_type == OutputType::BF16) {
+        CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &max_active_blocks,
+            nf4_decode_kernel<__nv_bfloat16>,
+            blockDim.x,
+            0));
+    } else {
+        CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &max_active_blocks,
+            nf4_decode_kernel<half>,
+            blockDim.x,
+            0));
+    }
     int grid_x = sm_count * max_active_blocks;
     int64_t max_grid = (total_words + blockDim.x - 1) / blockDim.x;
     if (grid_x > max_grid) {
@@ -297,17 +356,29 @@ int main(int argc, char** argv) {
     CHECK_CUDA(cudaEventCreate(&stop));
 
     // Warmup
-    nf4_decode_kernel<<<gridDim, blockDim>>>(
-        d_packed, d_absmax_q, d_absmax2, d_code2, offset, d_output, num_elements, blocksize, group_size
-    );
+    if (output_type == OutputType::BF16) {
+        nf4_decode_kernel<__nv_bfloat16><<<gridDim, blockDim>>>(
+            d_packed, d_absmax_q, d_absmax2, d_code2, offset, d_output_bf16, num_elements, blocksize, group_size
+        );
+    } else {
+        nf4_decode_kernel<half><<<gridDim, blockDim>>>(
+            d_packed, d_absmax_q, d_absmax2, d_code2, offset, d_output_fp16, num_elements, blocksize, group_size
+        );
+    }
     CHECK_CUDA(cudaDeviceSynchronize());
 
     const int iters = 100;
     CHECK_CUDA(cudaEventRecord(start));
     for (int i = 0; i < iters; ++i) {
-        nf4_decode_kernel<<<gridDim, blockDim>>>(
-            d_packed, d_absmax_q, d_absmax2, d_code2, offset, d_output, num_elements, blocksize, group_size
-        );
+        if (output_type == OutputType::BF16) {
+            nf4_decode_kernel<__nv_bfloat16><<<gridDim, blockDim>>>(
+                d_packed, d_absmax_q, d_absmax2, d_code2, offset, d_output_bf16, num_elements, blocksize, group_size
+            );
+        } else {
+            nf4_decode_kernel<half><<<gridDim, blockDim>>>(
+                d_packed, d_absmax_q, d_absmax2, d_code2, offset, d_output_fp16, num_elements, blocksize, group_size
+            );
+        }
     }
     CHECK_CUDA(cudaEventRecord(stop));
 // 5.记录性能，写入数据
@@ -319,8 +390,15 @@ int main(int argc, char** argv) {
     milliseconds /= iters;
 
 // 6. D2H 拷贝结果
-    std::vector<__nv_bfloat16> h_output(num_elements);
-    CHECK_CUDA(cudaMemcpy(h_output.data(), d_output, num_elements * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost));
+    std::vector<__nv_bfloat16> h_output_bf16;
+    std::vector<half> h_output_fp16;
+    if (output_type == OutputType::BF16) {
+        h_output_bf16.resize(num_elements);
+        CHECK_CUDA(cudaMemcpy(h_output_bf16.data(), d_output_bf16, num_elements * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost));
+    } else {
+        h_output_fp16.resize(num_elements);
+        CHECK_CUDA(cudaMemcpy(h_output_fp16.data(), d_output_fp16, num_elements * sizeof(half), cudaMemcpyDeviceToHost));
+    }
 
 // 7. 计算并打印性能
     double total_io_bytes = static_cast<double>(size_packed + size_absmax_q + size_absmax2 + size_code2) +
@@ -328,10 +406,15 @@ int main(int argc, char** argv) {
     double bandwidth = total_io_bytes / (milliseconds / 1000.0) / 1e9;
     std::cout << "Kernel Time: " << milliseconds << " ms" << std::endl;
     std::cout << "Effective Bandwidth (approx): " << bandwidth << " GB/s" << std::endl;
+    std::cout << "Output dtype: " << (output_type == OutputType::BF16 ? "bf16" : "fp16") << std::endl;
 
 // 8. 写入输出文件
     std::ofstream outfile(output_file, std::ios::binary);
-    outfile.write(reinterpret_cast<char*>(h_output.data()), num_elements * sizeof(__nv_bfloat16));
+    if (output_type == OutputType::BF16) {
+        outfile.write(reinterpret_cast<char*>(h_output_bf16.data()), num_elements * sizeof(__nv_bfloat16));
+    } else {
+        outfile.write(reinterpret_cast<char*>(h_output_fp16.data()), num_elements * sizeof(half));
+    }
     outfile.close();
     std::cout << "Output written to " << output_file << std::endl;
 
@@ -340,7 +423,8 @@ int main(int argc, char** argv) {
     cudaFree(d_absmax_q);
     cudaFree(d_absmax2);
     cudaFree(d_code2);
-    cudaFree(d_output);
+    if (d_output_bf16) cudaFree(d_output_bf16);
+    if (d_output_fp16) cudaFree(d_output_fp16);
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
 

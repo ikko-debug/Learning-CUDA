@@ -309,3 +309,64 @@ MAE (Mean Absolute Error): 0.000017
 Max Error:                 0.031250
 ------------------------------
 ✅ PASS: MAE (0.000017) is within threshold (0.01)
+## 使用inline(编译器优化)
+```cpp
+__device__ __forceinline__ float nf4_lut_value(uint8_t idx) {
+    switch (idx & 0x0F) {
+        case 0x0: return -1.0f;
+        case 0x1: return -0.6961928009986877f;
+        case 0x2: return -0.5250730514526367f;
+        case 0x3: return -0.39491748809814453f;
+        case 0x4: return -0.28444138169288635f;
+        case 0x5: return -0.18477343022823334f;
+        case 0x6: return -0.09105003625154495f;
+        case 0x7: return 0.0f;
+        case 0x8: return 0.07958029955625534f;
+        case 0x9: return 0.16093020141124725f;
+        case 0xA: return 0.24611230194568634f;
+        case 0xB: return 0.33791524171829224f;
+        case 0xC: return 0.44070982933044434f;
+        case 0xD: return 0.5626170039176941f;
+        case 0xE: return 0.7229568362236023f;
+        default: return 1.0f;
+    }
+}
+float v1 = nf4_lut_value(p >> 4) * real_absmax;
+                float v2 = nf4_lut_value(p & 0x0F) * real_absmax;
+Kernel Time: 2.58223 ms
+Effective Bandwidth (approx): 261.524 GB/s
+```
+遂撤回，改为寄存器缓存表值
+
+
+## 输出适配fp16
+```cpp
+template <typename T>
+__device__ __forceinline__ T float_to_out(float v);
+
+template <>
+__device__ __forceinline__ __nv_bfloat16 float_to_out<__nv_bfloat16>(float v) {
+    return __float2bfloat16(v);
+}
+
+template <>
+__device__ __forceinline__ half float_to_out<half>(float v) {
+    return __float2half(v);
+}
+
+template <typename T>
+__device__ __forceinline__ uint32_t pack_pair_to_u32(float v1, float v2);
+
+template <>
+__device__ __forceinline__ uint32_t pack_pair_to_u32<__nv_bfloat16>(float v1, float v2) {
+    __nv_bfloat162 packed = __floats2bfloat162_rn(v1, v2);
+    return *reinterpret_cast<uint32_t*>(&packed);
+}
+
+template <>
+__device__ __forceinline__ uint32_t pack_pair_to_u32<half>(float v1, float v2) {
+    half2 packed = __floats2half2_rn(v1, v2);
+    return *reinterpret_cast<uint32_t*>(&packed);
+}
+uint32_t u32_val = pack_pair_to_u32<OutT>(v1, v2);
+```

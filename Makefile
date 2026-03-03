@@ -94,7 +94,8 @@ clean:
 # NF4 one-command pipeline: compile + run + verify
 nf4:
 	@echo "=== [NF4] Compiling nf4/mainla.cu ==="
-	/usr/local/cuda/bin/nvcc -O3 -std=c++17 -arch=sm_80 nf4/mainla.cu -o nf4/mainla
+	@mkdir -p .tmp
+	TMPDIR=$(CURDIR)/.tmp /usr/local/cuda/bin/nvcc -O3 -std=c++17 -arch=sm_80 nf4/mainla.cu -o nf4/mainla
 	@echo "=== [NF4] Running nf4/mainla ==="
 	@echo "=== CUDA_VISIBLE_DEVICES=$(CUDA_DEVICE) ==="
 	CUDA_VISIBLE_DEVICES=$(CUDA_DEVICE) ./nf4/mainla
