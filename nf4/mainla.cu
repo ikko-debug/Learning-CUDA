@@ -154,11 +154,9 @@ __global__ void nf4_decode_kernel(
         int block_id = base_byte / (blocksize / 2);
         float real_absmax = (__half2float(absmax2[block_id / group_size]) * __half2float(code2[absmax_q[block_id]])) + offset;
 
-        // // 3. 定义 4 个 uint4 用于暂存结果（对应 32 个 bf16）
-        // uint4 res[4]; 
-
-        // 内部处理逻辑：我们分 4 组，每组处理 pw 的一个分量 (x, y, z, w)
-        // 这里的逻辑要尽量扁平化，不要用数组索引 b
+        // 3. 定义 4 个 uint4 用于暂存结果（对应 32 个 bf16）
+        // uint4 res[4];
+        // 内部处理逻辑：分 4 组，每组处理 pw 的一个分量 (x, y, z, w)
         auto decode_unit = [&](uint32_t w) -> uint4 {
             uint4 local_res;
             // 处理 w 中的 4 个字节，每个字节出 2 个 bf16，共 8 个 bf16 = 2 个 uint2 = 1 个 uint4
@@ -404,8 +402,16 @@ int main(int argc, char** argv) {
     double total_io_bytes = static_cast<double>(size_packed + size_absmax_q + size_absmax2 + size_code2) +
                             static_cast<double>(num_elements * 2);
     double bandwidth = total_io_bytes / (milliseconds / 1000.0) / 1e9;
+    constexpr double bnb_ref_ms = 1.243360;
+    constexpr double bnb_ref_bw = 543.14;
+    double speedup_vs_bnb = bnb_ref_ms / static_cast<double>(milliseconds);
+    double bw_ratio_vs_bnb = bandwidth / bnb_ref_bw;
     std::cout << "Kernel Time: " << milliseconds << " ms" << std::endl;
     std::cout << "Effective Bandwidth (approx): " << bandwidth << " GB/s" << std::endl;
+    std::cout << "Speedup vs bitsandbytes: " << speedup_vs_bnb << "x"
+              << " (ref " << bnb_ref_ms << " ms)" << std::endl;
+    std::cout << "Bandwidth ratio vs bitsandbytes: " << bw_ratio_vs_bnb << "x"
+              << " (ref " << bnb_ref_bw << " GB/s)" << std::endl;
     std::cout << "Output dtype: " << (output_type == OutputType::BF16 ? "bf16" : "fp16") << std::endl;
 
 // 8. 写入输出文件

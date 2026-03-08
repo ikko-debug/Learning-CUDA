@@ -7,7 +7,9 @@
 *.a
 *.out
 *.bin
-
+*.nsys-rep
+*.sqlite
+*.pyc
 # Local executable built in nf4
 nf4/mainla
 

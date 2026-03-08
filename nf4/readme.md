@@ -64,8 +64,8 @@ print(f"bitsandbytes dequantize_4bit: {ms:.6f} ms")
 print(f"Approx bandwidth: {bandwidth:.2f} GB/s")
 PY
 ```
-时间：0.083885 ms
-近似带宽：503.16 GB/s
+bitsandbytes dequantize_4bit: 1.241162 ms
+Approx bandwidth: 544.10 GB/s
 ## 构造标准测试集
 
 
@@ -369,4 +369,114 @@ __device__ __forceinline__ uint32_t pack_pair_to_u32<half>(float v1, float v2) {
     return *reinterpret_cast<uint32_t*>(&packed);
 }
 uint32_t u32_val = pack_pair_to_u32<OutT>(v1, v2);
+```
+## 新增加速比，并修改makefile
+输出
+```cpp
+(cuda) ikko@dsw-607126-85f54bdf75-5lzlx:~/Learning-CUDA$ make nf4
+=== [NF4] Compiling nf4/mainla.cu ===
+TMPDIR=/home/ikko/Learning-CUDA/.tmp /usr/local/cuda/bin/nvcc -O3 -std=c++17 -arch=sm_80 nf4/mainla.cu -o nf4/mainla
+=== [NF4] Running nf4/mainla ===
+=== CUDA_VISIBLE_DEVICES=7 ===
+CUDA_VISIBLE_DEVICES=7 ./nf4/mainla
+SM count: 108, max active blocks/SM: 8, grid_x: 864
+Kernel Time: 0.968471 ms
+Effective Bandwidth (approx): 697.301 GB/s
+Speedup vs bitsandbytes: 1.28384x (ref 1.24336 ms)
+Bandwidth ratio vs bitsandbytes: 1.28383x (ref 543.14 GB/s)
+Output dtype: bf16
+Output written to nf4/data/output.bin
+=== [NF4] Verifying MAE ===
+CUDA_VISIBLE_DEVICES=7 python nf4/verify_mae.py
+=== Starting Verification ===
+Shape: 16384x16384, Blocksize: 64
+------------------------------
+MAE (Mean Absolute Error): 0.000017
+Max Error:                 0.031250
+------------------------------
+✅ PASS: MAE (0.000017) is within threshold (0.01)
+```
+## nsys分析
+```shell
+nsys profile --stats=true --force-overwrite=true -o nf4_profile ./nf4/main
+```
+输出
+```
+Collecting data...
+SM count: 108, max active blocks/SM: 8, grid_x: 864
+Kernel Time: 1.85433 ms
+Effective Bandwidth (approx): 364.183 GB/s
+Speedup vs bitsandbytes: 0.670517x (ref 1.24336 ms)
+Bandwidth ratio vs bitsandbytes: 0.670515x (ref 543.14 GB/s)
+Output dtype: bf16
+Output written to nf4/data/output_bf16.bin
+Generating '/tmp/nsys-report-aac2.qdstrm'
+[1/8] [========================100%] nsys_mainla_bf16.nsys-rep
+[2/8] [========================100%] nsys_mainla_bf16.sqlite
+[3/8] Executing 'nvtx_sum' stats report
+SKIPPED: /home/ikko/Learning-CUDA/nf4/nsys_mainla_bf16.sqlite does not contain NV Tools Extension (NVTX) data.
+[4/8] Executing 'osrt_sum' stats report
+
+ Time (%)  Total Time (ns)  Num Calls   Avg (ns)     Med (ns)    Min (ns)   Max (ns)   StdDev (ns)           Name         
+ --------  ---------------  ---------  -----------  -----------  ---------  ---------  -----------  ----------------------
+     58.9       1684692553         24   70195523.0   73322110.5     320037  381847608   79085855.6  poll                  
+     18.6        532343606       1622     328202.0      64362.5       1125   15994793     862809.4  ioctl                 
+     11.3        322412024         31   10400387.9       1856.0       1022  322343688   57894226.3  fclose                
+      8.1        232039676          1  232039676.0  232039676.0  232039676  232039676          0.0  writev                
+      2.0         57202734        112     510738.7       2468.0       1002   56702430    5357453.0  fopen                 
+      1.0         28063349         11    2551213.5       1931.0       1007   27199930    8178930.8  read                  
+      0.1          1904289         43      44285.8      10845.0       6238    1058775     159640.8  mmap64                
+      0.0           673049         10      67304.9      57184.0      21078     112731      29916.6  sem_timedwait         
+      0.0           623082        118       5280.4       4386.0       1603      16509       3208.3  open64                
+      0.0           306282          2     153141.0     153141.0     139640     166642      19093.3  pthread_create        
+      0.0           201836         16      12614.8       5748.5       1002      88787      20920.5  mmap                  
+      0.0            82243          1      82243.0      82243.0      82243      82243          0.0  pthread_cond_wait     
+      0.0            77095         11       7008.6       7257.0       4709       9864       1769.3  write                 
+      0.0            47414          8       5926.8       4498.0       2641      12043       3485.8  munmap                
+      0.0            32173          3      10724.3      12344.0       6113      13716       4052.0  putc                  
+      0.0            29046          1      29046.0      29046.0      29046      29046          0.0  fgets                 
+      0.0            24664          5       4932.8       4357.0       2220       7422       2186.0  open                  
+      0.0            20110          4       5027.5       4305.5       1200      10299       4042.1  fwrite                
+      0.0            13228          3       4409.3       3261.0       1894       8073       3245.6  pipe2                 
+      0.0            11141          2       5570.5       5570.5       5464       5677        150.6  socket                
+      0.0             9397          2       4698.5       4698.5       1691       7706       4253.2  pthread_cond_broadcast
+      0.0             7259          1       7259.0       7259.0       7259       7259          0.0  connect               
+      0.0             6258          5       1251.6       1244.0       1080       1351        109.6  fcntl                 
+      0.0             4160          1       4160.0       4160.0       4160       4160          0.0  fread                 
+      0.0             2407          1       2407.0       2407.0       2407       2407          0.0  bind                  
+
+[5/8] Executing 'cuda_api_sum' stats report
+
+ Time (%)  Total Time (ns)  Num Calls   Avg (ns)     Med (ns)    Min (ns)   Max (ns)   StdDev (ns)           Name         
+ --------  ---------------  ---------  -----------  -----------  ---------  ---------  -----------  ----------------------
+     51.2        277706536          5   55541307.2    1658159.0       5925  272606419  121345975.1  cudaMalloc            
+     34.5        187258524          1  187258524.0  187258524.0  187258524  187258524          0.0  cudaEventSynchronize  
+     12.5         67776654          5   13555330.8    1488128.0      63639   51690255   22091691.8  cudaMemcpy            
+      1.2          6327994          5    1265598.8    1131945.0      20003    2503567     933614.4  cudaFree              
+      0.6          3056503          1    3056503.0    3056503.0    3056503    3056503          0.0  cudaDeviceSynchronize 
+      0.1           578595        101       5728.7       4944.0       4228      36734       3821.5  cudaLaunchKernel      
+      0.0            22548          2      11274.0      11274.0       5889      16659       7615.5  cudaEventRecord       
+      0.0            17520          2       8760.0       8760.0        762      16758      11310.9  cudaEventDestroy      
+      0.0             6073          2       3036.5       3036.5        780       5293       3191.2  cudaEventCreate       
+      0.0             1196          1       1196.0       1196.0       1196       1196          0.0  cuModuleGetLoadingMode
+
+[6/8] Executing 'cuda_gpu_kern_sum' stats report
+
+ Time (%)  Total Time (ns)  Instances  Avg (ns)   Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                                                  Name                                                
+ --------  ---------------  ---------  ---------  --------  --------  --------  -----------  ----------------------------------------------------------------------------------------------------
+    100.0        186128837        101  1842859.8  834756.0    812388   3455505    1258741.2  void nf4_decode_kernel<__nv_bfloat16>(const uint4 *, const unsigned char *, const __half *, const _…
+
+[7/8] Executing 'cuda_gpu_mem_time_sum' stats report
+
+ Time (%)  Total Time (ns)  Count   Avg (ns)    Med (ns)   Min (ns)  Max (ns)  StdDev (ns)           Operation          
+ --------  ---------------  -----  ----------  ----------  --------  --------  -----------  ----------------------------
+     78.2         51319384      1  51319384.0  51319384.0  51319384  51319384          0.0  [CUDA memcpy Device-to-Host]
+     21.8         14291557      4   3572889.3    194241.0      3008  13900067    6887079.2  [CUDA memcpy Host-to-Device]
+
+[8/8] Executing 'cuda_gpu_mem_size_sum' stats report
+
+ Total (MB)  Count  Avg (MB)  Med (MB)  Min (MB)  Max (MB)  StdDev (MB)           Operation          
+ ----------  -----  --------  --------  --------  --------  -----------  ----------------------------
+    536.871      1   536.871   536.871   536.871   536.871        0.000  [CUDA memcpy Device-to-Host]
+    138.445      4    34.611     2.114     0.001   134.218       66.433  [CUDA memcpy Host-to-Device]
 ```
