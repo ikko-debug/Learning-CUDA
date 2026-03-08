@@ -155,16 +155,16 @@ int main(int argc, char** argv) {
     half* d_code2 = nullptr;
     half* d_output = nullptr;
 
-    RUNTIME_CHECK(macaMalloc(&d_packed, size_packed));
-    RUNTIME_CHECK(macaMalloc(&d_absmax_q, size_absmax_q));
-    RUNTIME_CHECK(macaMalloc(&d_absmax2, size_absmax2));
-    RUNTIME_CHECK(macaMalloc(&d_code2, size_code2));
-    RUNTIME_CHECK(macaMalloc(&d_output, static_cast<size_t>(num_elements) * sizeof(half)));
+    RUNTIME_CHECK(mcMalloc(&d_packed, size_packed));
+    RUNTIME_CHECK(mcMalloc(&d_absmax_q, size_absmax_q));
+    RUNTIME_CHECK(mcMalloc(&d_absmax2, size_absmax2));
+    RUNTIME_CHECK(mcMalloc(&d_code2, size_code2));
+    RUNTIME_CHECK(mcMalloc(&d_output, static_cast<size_t>(num_elements) * sizeof(half)));
 
-    RUNTIME_CHECK(macaMemcpy(d_packed, h_packed.data(), size_packed, macaMemcpyHostToDevice));
-    RUNTIME_CHECK(macaMemcpy(d_absmax_q, h_absmax_q.data(), size_absmax_q, macaMemcpyHostToDevice));
-    RUNTIME_CHECK(macaMemcpy(d_absmax2, h_absmax2.data(), size_absmax2, macaMemcpyHostToDevice));
-    RUNTIME_CHECK(macaMemcpy(d_code2, h_code2.data(), size_code2, macaMemcpyHostToDevice));
+    RUNTIME_CHECK(mcMemcpy(d_packed, h_packed.data(), size_packed, mcMemcpyHostToDevice));
+    RUNTIME_CHECK(mcMemcpy(d_absmax_q, h_absmax_q.data(), size_absmax_q, mcMemcpyHostToDevice));
+    RUNTIME_CHECK(mcMemcpy(d_absmax2, h_absmax2.data(), size_absmax2, mcMemcpyHostToDevice));
+    RUNTIME_CHECK(mcMemcpy(d_code2, h_code2.data(), size_code2, mcMemcpyHostToDevice));
 
     dim3 block_dim(256);
     int64_t total_bytes = (num_elements + 1) / 2;
@@ -182,8 +182,8 @@ int main(int argc, char** argv) {
 
     nf4_decode_kernel_fp16<<<grid_dim, block_dim>>>(
         d_packed, d_absmax_q, d_absmax2, d_code2, offset, d_output, num_elements, blocksize, group_size);
-    RUNTIME_CHECK(macaGetLastError());
-    RUNTIME_CHECK(macaDeviceSynchronize());
+    RUNTIME_CHECK(mcGetLastError());
+    RUNTIME_CHECK(mcDeviceSynchronize());
 
     const int iters = 100;
     auto t0 = std::chrono::high_resolution_clock::now();
@@ -191,14 +191,14 @@ int main(int argc, char** argv) {
         nf4_decode_kernel_fp16<<<grid_dim, block_dim>>>(
             d_packed, d_absmax_q, d_absmax2, d_code2, offset, d_output, num_elements, blocksize, group_size);
     }
-    RUNTIME_CHECK(macaGetLastError());
-    RUNTIME_CHECK(macaDeviceSynchronize());
+    RUNTIME_CHECK(mcGetLastError());
+    RUNTIME_CHECK(mcDeviceSynchronize());
     auto t1 = std::chrono::high_resolution_clock::now();
 
     double milliseconds = std::chrono::duration<double, std::milli>(t1 - t0).count() / static_cast<double>(iters);
 
     std::vector<half> h_output(static_cast<size_t>(num_elements));
-    RUNTIME_CHECK(macaMemcpy(h_output.data(), d_output, static_cast<size_t>(num_elements) * sizeof(half), macaMemcpyDeviceToHost));
+    RUNTIME_CHECK(mcMemcpy(h_output.data(), d_output, static_cast<size_t>(num_elements) * sizeof(half), mcMemcpyDeviceToHost));
 
     double total_io_bytes = static_cast<double>(size_packed + size_absmax_q + size_absmax2 + size_code2) +
                             static_cast<double>(num_elements * sizeof(half));
@@ -214,11 +214,11 @@ int main(int argc, char** argv) {
     outfile.close();
     std::cout << "Output written to " << output_file << std::endl;
 
-    RUNTIME_CHECK(macaFree(d_packed));
-    RUNTIME_CHECK(macaFree(d_absmax_q));
-    RUNTIME_CHECK(macaFree(d_absmax2));
-    RUNTIME_CHECK(macaFree(d_code2));
-    RUNTIME_CHECK(macaFree(d_output));
+    RUNTIME_CHECK(mcFree(d_packed));
+    RUNTIME_CHECK(mcFree(d_absmax_q));
+    RUNTIME_CHECK(mcFree(d_absmax2));
+    RUNTIME_CHECK(mcFree(d_code2));
+    RUNTIME_CHECK(mcFree(d_output));
 
     return 0;
 }

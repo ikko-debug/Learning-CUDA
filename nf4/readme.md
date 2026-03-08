@@ -480,3 +480,168 @@ SKIPPED: /home/ikko/Learning-CUDA/nf4/nsys_mainla_bf16.sqlite does not contain N
     536.871      1   536.871   536.871   536.871   536.871        0.000  [CUDA memcpy Device-to-Host]
     138.445      4    34.611     2.114     0.001   134.218       66.433  [CUDA memcpy Host-to-Device]
 ```
+## ncu
+
+
+## maca
+cd /data/Learning-CUDA && mxcc -O3 -std=c++17 nf4/mainla.maca -o nf4/mainla_maca
+```cpp
+cd /data/Learning-CUDA && mxcc -O3 -std=c++17 nf4/mainla.maca -o nf4/mainla_maca
+nf4/mainla.maca:158:19: error: use of undeclared identifier 'macaMalloc'; did you mean 'mcMalloc'?
+    RUNTIME_CHECK(macaMalloc(&d_packed, size_packed));
+                  ^~~~~~~~~~
+                  mcMalloc
+nf4/../tester/utils.h:29:28: note: expanded from macro 'RUNTIME_CHECK'
+    RUNTIME_ERR_TYPE err = call;                                               \
+                           ^
+/opt/maca/include/mcr/mc_runtime_api_template_wrapper.h:6:44: note: 'mcMalloc' declared here
+template <class T> static inline mcError_t mcMalloc(T **devPtr, size_t size)
+                                           ^
+nf4/mainla.maca:159:19: error: use of undeclared identifier 'macaMalloc'; did you mean 'mcMalloc'?
+    RUNTIME_CHECK(macaMalloc(&d_absmax_q, size_absmax_q));
+                  ^~~~~~~~~~
+                  mcMalloc
+nf4/../tester/utils.h:29:28: note: expanded from macro 'RUNTIME_CHECK'
+    RUNTIME_ERR_TYPE err = call;                                               \
+                           ^
+/opt/maca/include/mcr/mc_runtime_api_template_wrapper.h:6:44: note: 'mcMalloc' declared here
+template <class T> static inline mcError_t mcMalloc(T **devPtr, size_t size)
+                                           ^
+nf4/mainla.maca:160:19: error: use of undeclared identifier 'macaMalloc'; did you mean 'mcMalloc'?
+    RUNTIME_CHECK(macaMalloc(&d_absmax2, size_absmax2));
+                  ^~~~~~~~~~
+                  mcMalloc
+nf4/../tester/utils.h:29:28: note: expanded from macro 'RUNTIME_CHECK'
+    RUNTIME_ERR_TYPE err = call;                                               \
+                           ^
+/opt/maca/include/mcr/mc_runtime_api_template_wrapper.h:6:44: note: 'mcMalloc' declared here
+template <class T> static inline mcError_t mcMalloc(T **devPtr, size_t size)
+                                           ^
+nf4/mainla.maca:161:19: error: use of undeclared identifier 'macaMalloc'; did you mean 'mcMalloc'?
+    RUNTIME_CHECK(macaMalloc(&d_code2, size_code2));
+                  ^~~~~~~~~~
+                  mcMalloc
+nf4/../tester/utils.h:29:28: note: expanded from macro 'RUNTIME_CHECK'
+    RUNTIME_ERR_TYPE err = call;                                               \
+                           ^
+/opt/maca/include/mcr/mc_runtime_api_template_wrapper.h:6:44: note: 'mcMalloc' declared here
+template <class T> static inline mcError_t mcMalloc(T **devPtr, size_t size)
+                                           ^
+nf4/mainla.maca:162:19: error: use of undeclared identifier 'macaMalloc'; did you mean 'mcMalloc'?
+    RUNTIME_CHECK(macaMalloc(&d_output, static_cast<size_t>(num_elements) * sizeof(half)));
+                  ^~~~~~~~~~
+                  mcMalloc
+nf4/../tester/utils.h:29:28: note: expanded from macro 'RUNTIME_CHECK'
+    RUNTIME_ERR_TYPE err = call;                                               \
+                           ^
+/opt/maca/include/mcr/mc_runtime_api_template_wrapper.h:6:44: note: 'mcMalloc' declared here
+template <class T> static inline mcError_t mcMalloc(T **devPtr, size_t size)
+                                           ^
+nf4/mainla.maca:164:70: error: use of undeclared identifier 'macaMemcpyHostToDevice'
+    RUNTIME_CHECK(macaMemcpy(d_packed, h_packed.data(), size_packed, macaMemcpyHostToDevice));
+                                                                     ^
+nf4/mainla.maca:165:76: error: use of undeclared identifier 'macaMemcpyHostToDevice'
+    RUNTIME_CHECK(macaMemcpy(d_absmax_q, h_absmax_q.data(), size_absmax_q, macaMemcpyHostToDevice));
+                                                                           ^
+nf4/mainla.maca:166:73: error: use of undeclared identifier 'macaMemcpyHostToDevice'
+    RUNTIME_CHECK(macaMemcpy(d_absmax2, h_absmax2.data(), size_absmax2, macaMemcpyHostToDevice));
+                                                                        ^
+nf4/mainla.maca:167:67: error: use of undeclared identifier 'macaMemcpyHostToDevice'
+    RUNTIME_CHECK(macaMemcpy(d_code2, h_code2.data(), size_code2, macaMemcpyHostToDevice));
+                                                                  ^
+nf4/mainla.maca:185:19: error: use of undeclared identifier 'macaGetLastError'; did you mean 'mcGetLastError'?
+    RUNTIME_CHECK(macaGetLastError());
+                  ^~~~~~~~~~~~~~~~
+                  mcGetLastError
+nf4/../tester/utils.h:29:28: note: expanded from macro 'RUNTIME_CHECK'
+    RUNTIME_ERR_TYPE err = call;                                               \
+                           ^
+/opt/maca/include/mcr/mc_runtime_api.h:2311:11: note: 'mcGetLastError' declared here
+mcError_t mcGetLastError(void);
+          ^
+nf4/mainla.maca:186:19: error: use of undeclared identifier 'macaDeviceSynchronize'; did you mean 'mcDeviceSynchronize'?
+    RUNTIME_CHECK(macaDeviceSynchronize());
+                  ^~~~~~~~~~~~~~~~~~~~~
+                  mcDeviceSynchronize
+nf4/../tester/utils.h:29:28: note: expanded from macro 'RUNTIME_CHECK'
+    RUNTIME_ERR_TYPE err = call;                                               \
+                           ^
+/opt/maca/include/mcr/mc_runtime_api.h:570:11: note: 'mcDeviceSynchronize' declared here
+mcError_t mcDeviceSynchronize(void);
+          ^
+nf4/mainla.maca:194:19: error: use of undeclared identifier 'macaGetLastError'; did you mean 'mcGetLastError'?
+    RUNTIME_CHECK(macaGetLastError());
+                  ^~~~~~~~~~~~~~~~
+                  mcGetLastError
+nf4/../tester/utils.h:29:28: note: expanded from macro 'RUNTIME_CHECK'
+    RUNTIME_ERR_TYPE err = call;                                               \
+                           ^
+/opt/maca/include/mcr/mc_runtime_api.h:2311:11: note: 'mcGetLastError' declared here
+mcError_t mcGetLastError(void);
+          ^
+nf4/mainla.maca:195:19: error: use of undeclared identifier 'macaDeviceSynchronize'; did you mean 'mcDeviceSynchronize'?
+    RUNTIME_CHECK(macaDeviceSynchronize());
+                  ^~~~~~~~~~~~~~~~~~~~~
+                  mcDeviceSynchronize
+nf4/../tester/utils.h:29:28: note: expanded from macro 'RUNTIME_CHECK'
+    RUNTIME_ERR_TYPE err = call;                                               \
+                           ^
+/opt/maca/include/mcr/mc_runtime_api.h:570:11: note: 'mcDeviceSynchronize' declared here
+mcError_t mcDeviceSynchronize(void);
+          ^
+nf4/mainla.maca:201:107: error: use of undeclared identifier 'macaMemcpyDeviceToHost'
+    RUNTIME_CHECK(macaMemcpy(h_output.data(), d_output, static_cast<size_t>(num_elements) * sizeof(half), macaMemcpyDeviceToHost));
+                                                                                                          ^
+nf4/mainla.maca:217:19: error: use of undeclared identifier 'macaFree'; did you mean 'mcFree'?
+    RUNTIME_CHECK(macaFree(d_packed));
+                  ^~~~~~~~
+                  mcFree
+nf4/../tester/utils.h:29:28: note: expanded from macro 'RUNTIME_CHECK'
+    RUNTIME_ERR_TYPE err = call;                                               \
+                           ^
+/opt/maca/include/mcr/mc_runtime_api.h:2609:11: note: 'mcFree' declared here
+mcError_t mcFree(void *ptr);
+          ^
+nf4/mainla.maca:218:19: error: use of undeclared identifier 'macaFree'; did you mean 'mcFree'?
+    RUNTIME_CHECK(macaFree(d_absmax_q));
+                  ^~~~~~~~
+                  mcFree
+nf4/../tester/utils.h:29:28: note: expanded from macro 'RUNTIME_CHECK'
+    RUNTIME_ERR_TYPE err = call;                                               \
+                           ^
+/opt/maca/include/mcr/mc_runtime_api.h:2609:11: note: 'mcFree' declared here
+mcError_t mcFree(void *ptr);
+          ^
+nf4/mainla.maca:219:19: error: use of undeclared identifier 'macaFree'; did you mean 'mcFree'?
+    RUNTIME_CHECK(macaFree(d_absmax2));
+                  ^~~~~~~~
+                  mcFree
+nf4/../tester/utils.h:29:28: note: expanded from macro 'RUNTIME_CHECK'
+    RUNTIME_ERR_TYPE err = call;                                               \
+                           ^
+/opt/maca/include/mcr/mc_runtime_api.h:2609:11: note: 'mcFree' declared here
+mcError_t mcFree(void *ptr);
+          ^
+nf4/mainla.maca:220:19: error: use of undeclared identifier 'macaFree'; did you mean 'mcFree'?
+    RUNTIME_CHECK(macaFree(d_code2));
+                  ^~~~~~~~
+                  mcFree
+nf4/../tester/utils.h:29:28: note: expanded from macro 'RUNTIME_CHECK'
+    RUNTIME_ERR_TYPE err = call;                                               \
+                           ^
+/opt/maca/include/mcr/mc_runtime_api.h:2609:11: note: 'mcFree' declared here
+mcError_t mcFree(void *ptr);
+          ^
+nf4/mainla.maca:221:19: error: use of undeclared identifier 'macaFree'; did you mean 'mcFree'?
+    RUNTIME_CHECK(macaFree(d_output));
+                  ^~~~~~~~
+                  mcFree
+nf4/../tester/utils.h:29:28: note: expanded from macro 'RUNTIME_CHECK'
+    RUNTIME_ERR_TYPE err = call;                                               \
+                           ^
+/opt/maca/include/mcr/mc_runtime_api.h:2609:11: note: 'mcFree' declared here
+mcError_t mcFree(void *ptr);
+          ^
+19 errors generated when compiling for host.
+```
+原来沐曦用的是mc而不是maca
