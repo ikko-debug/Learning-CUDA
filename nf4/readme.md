@@ -572,10 +572,7 @@ SKIPPED: /home/ikko/Learning-CUDA/nf4/nsys_mainla_bf16.sqlite does not contain N
     536.871      1   536.871   536.871   536.871   536.871        0.000  [CUDA memcpy Device-to-Host]
     138.445      4    34.611     2.114     0.001   134.218       66.433  [CUDA memcpy Host-to-Device]
 ```
-## ncu
 
-4090上ncu的结果
-见nf4/ncu_report.txt
 ## maca
 cd /data/Learning-CUDA && mxcc -O3 -std=c++17 nf4/mainla.maca -o nf4/mainla_maca
 ```cpp
@@ -738,7 +735,98 @@ mcError_t mcFree(void *ptr);
 19 errors generated when compiling for host.
 ```
 原来沐曦用的是mc而不是maca
-## blocksize,group_size
+
+
+## ncu
+
+4090上ncu的结果
+```shell
+sudo ncu \
+  --section SpeedOfLight \
+  --section MemoryWorkloadAnalysis \
+  --launch-skip 1 \
+  --launch-count 1 \
+  ./nf4/mainla bf16
+```
+拿到的关键信息大致是：
+	•	DRAM Throughput ≈ 83%
+	•	Memory ≈ 83%
+	•	Compute (SM) ≈ 38% ~ 42%
+	•	Memory Throughput ≈ 816 ~ 824 GB/s
+	•	L2 Hit Rate ≈ 79.84%
+说明 1.	这个 kernel 已经明显是 memory-bound；
+	2.	不是算力没吃满，而是 DRAM 带宽已经被压得比较高；
+	3.	继续优化如果不动访存主路径，很难有大提升。
+
+```shell
+sudo ncu \
+  --section SchedulerStats \
+  --section WarpStateStats \
+  --launch-skip 1 \
+  --launch-count 1 \
+  ./nf4/mainla bf16
+==PROF== Connected to process 810279 (/home/xjy/Learning-CUDA/nf4/mainla)
+SM count: 128, max active blocks/SM: 6, grid_x: 768
+==PROF== Profiling "nf4_decode_kernel" - 0 (1/1): 0%....50%....100% - 8 passes
+Kernel Time: 2.01215 ms
+Effective Bandwidth (approx): 335.62 GB/s
+Speedup vs bitsandbytes: 0.617927x (ref 1.24336 ms)
+Bandwidth ratio vs bitsandbytes: 0.617925x (ref 543.14 GB/s)
+Output dtype: bf16
+Output written to nf4/data/output_bf16.bin
+==PROF== Disconnected from process 810279
+[810279] mainla@127.0.0.1
+  void nf4_decode_kernel<__nv_bfloat16>(const unsigned char *, const unsigned char *, const __half *, const __half *, float, T1 *, long, int, int), 2026-Mar-10 14:16:43, Context 1, Stream 7
+    Section: Scheduler Statistics
+    ---------------------------------------------------------------------- --------------- ------------------------------
+    One or More Eligible                                                                 %                          42.23
+    Issued Warp Per Scheduler                                                                                        0.42
+    No Eligible                                                                          %                          57.77
+    Active Warps Per Scheduler                                                        warp                          12.08
+    Eligible Warps Per Scheduler                                                      warp                           1.11
+    ---------------------------------------------------------------------- --------------- ------------------------------
+    WRN   Every scheduler is capable of issuing one instruction per cycle, but for this kernel each scheduler only      
+          issues an instruction every 2.4 cycles. This might leave hardware resources underutilized and may lead to     
+          less optimal performance. Out of the maximum of 12 warps per scheduler, this kernel allocates an average of   
+          12.08 active warps per scheduler, but only an average of 1.11 warps were eligible per cycle. Eligible warps   
+          are the subset of active warps that are ready to issue their next instruction. Every cycle with no eligible   
+          warp results in no instruction being issued and the issue slot remains unused. To increase the number of      
+          eligible warps, avoid possible load imbalances due to highly different execution durations per warp.          
+          Reducing stalls indicated on the Warp State Statistics and Source Counters sections can help, too.            
+
+    Section: Warp State Statistics
+    ---------------------------------------------------------------------- --------------- ------------------------------
+    Warp Cycles Per Issued Instruction                                               cycle                          28.61
+    Warp Cycles Per Executed Instruction                                             cycle                          28.61
+    Avg. Active Threads Per Warp                                                                                    19.67
+    Avg. Not Predicated Off Threads Per Warp                                                                        18.16
+    ---------------------------------------------------------------------- --------------- ------------------------------
+    WRN   On average, each warp of this kernel spends 19.0 cycles being stalled waiting for a scoreboard dependency on  
+          a L1TEX (local, global, surface, texture, rtcore) operation. This represents about 66.5% of the total         
+          average of 28.6 cycles between issuing two instructions. To reduce the number of cycles waiting on L1TEX      
+          data accesses verify the memory access patterns are optimal for the target architecture, attempt to increase  
+          cache hit rates by increasing data locality or by changing the cache configuration, and consider moving       
+          frequently used data to registers and to shared memory.                                                       
+    ----- --------------------------------------------------------------------------------------------------------------
+    INF   Check the Source Counters section for the top stall locations in your source based on sampling data. The      
+          Kernel Profiling Guide (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#sampling) provides   
+          more details on each stall reason.                                                                            
+    ----- --------------------------------------------------------------------------------------------------------------
+    WRN   Instructions are executed in warps, which are groups of 32 threads. Optimal instruction throughput is         
+          achieved if all 32 threads of a warp execute the same instruction. The chosen launch configuration, early     
+          thread completion, and divergent flow control can significantly lower the number of active threads in a warp  
+          per cycle. This kernel achieves an average of 19.7 threads being active per cycle. This is further reduced    
+          to 18.2 threads per warp due to predication. The compiler may use predication to avoid an actual branch.      
+          Instead, all instructions are scheduled, but a per-thread condition code or predicate controls which threads  
+          execute the instructions. Try to avoid different execution paths within a warp when possible. In addition,    
+          ensure your kernel makes use of Independent Thread Scheduling, which allows a warp to reconverge after a      
+          data-dependent conditional block by explicitly calling __syncwarp().
+```
+不是抽象地 memory-bound，而是 大量 warp 在等 L1TEX 路径上的 load 返回；调度器手上虽然挂了很多 warp，但真正能随时发射的 warp 很少；所以 issue slot 经常空着。
+怀疑：1.不只是主数据流 packed_weights 在拖；
+2.absmax_q / absmax2 / code2 这些访问也可能形成依赖链；
+3.另外，热路径里的整数计算（特别是除法）可能在吃性能。
+### blocksize,group_size
 printf("group_size: %d,block_size: %d",group_size,blocksize);
 得到block_size: 64；group_size:256
 ```cpp
@@ -749,3 +837,28 @@ float real_absmax = 0.0f;
         }
         real_absmax = __shfl_sync(warp_mask, real_absmax, 0);
 ```
+没啥变化
+可能code2 / absmax2 这种小数据本来就可能已经被 cache 命中；新加的 if (lane == 0) 和 __shfl_sync 也有额外开销。
+
+综上
+综合几轮 NCU，我目前对这个 kernel 的判断是：
+
+已经确认的事实
+	1.	它是明显的 memory-bound kernel；
+	2.	DRAM 带宽已经吃到比较高；
+	3.	warp 大量 stall 在 L1TEX scoreboard dependency 上；
+	4.	shared LUT 在我的测试里更快，应该保留；
+	5.	real_absmax 的 warp 广播不是主收益点；
+	6.	热路径里的运行时除法是一个更值得优先处理的问题。
+
+热路径的主要成本大概来自：
+主成本
+	•	packed_weights[byte_idx] 的 load
+	•	out_u32[byte_idx] 的 store
+次成本
+	•	absmax_q[block_id]
+	•	absmax2[group_id]
+	•	code2[qa]
+可能被低估的成本
+	•	byte_idx / (blocksize / 2)
+	•	block_id / group_size
