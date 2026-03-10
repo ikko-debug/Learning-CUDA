@@ -396,6 +396,98 @@ Max Error:                 0.031250
 ------------------------------
 ✅ PASS: MAE (0.000017) is within threshold (0.01)
 ```
+## 按题目要求回退线程粒度
+
+题目要求的是 Packed Store：每个线程一次只处理两个 4-bit 索引，也就是读取 1 个 packed byte，算出 2 个 bf16 后，打包成 1 个 uint32_t，一次性写回全局内存。
+而我前一版做的是：kernel 输入改成 const uint4*，每个线程先读 1 个 uint4，也就是 16 个 byte
+16 个 byte 对应 32 个 4-bit 索引
+线程内部虽然也调用了 pack_pair_to_u32<OutT>(v1, v2)
+但那只是线程内部的中间步骤，最终是把 16 个 uint32 再组成 4 个 uint4 写回
+也就是说，之前那版本质上是：
+每线程处理 16 个 packed byte
+每线程解码 32 个 4-bit 索引
+每线程最终写 4 个 uint4
+这不等于题目要求的：
+每线程处理 1 个 packed byte，每线程解码 2 个 4-bit 索引，每线程最终写 1 个 uint32_t。所以这里重新改回严格按题目要求实现。
+```cpp
+template <typename OutT>
+__global__ void nf4_decode_kernel(
+    const uint8_t* __restrict__ packed_weights,
+    const uint8_t* __restrict__ absmax_q,
+    const half* __restrict__ absmax2,
+    const half* __restrict__ code2,
+    const float offset,
+    OutT* __restrict__ output,
+    int64_t num_elements,
+    int blocksize,
+    int group_size
+) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = gridDim.x * blockDim.x;
+    int64_t total_bytes = (num_elements + 1) / 2;
+    int64_t full_pair_bytes = num_elements / 2;
+
+    __shared__ float s_LUT[16];
+    if (threadIdx.x < 16) {
+        s_LUT[threadIdx.x] = NF4_LUT[threadIdx.x];
+    }
+    __syncthreads();
+    uint32_t* out_u32 = reinterpret_cast<uint32_t*>(output);
+
+    for (int64_t byte_idx = tid; byte_idx < full_pair_bytes; byte_idx += stride) {
+        uint8_t packed = packed_weights[byte_idx];
+        int block_id = static_cast<int>(byte_idx / (blocksize / 2));
+        int group_id = block_id / group_size;
+        float real_absmax = (__half2float(absmax2[group_id]) * __half2float(code2[absmax_q[block_id]])) + offset;
+        float v1 = s_LUT[packed >> 4] * real_absmax;
+        float v2 = s_LUT[packed & 0x0F] * real_absmax;
+        out_u32[byte_idx] = pack_pair_to_u32<OutT>(v1, v2);
+    }
+
+    if ((num_elements & 1) != 0) {
+        int64_t tail_byte = total_bytes - 1;
+        if (tid == 0) {
+            uint8_t packed = packed_weights[tail_byte];
+            int block_id = static_cast<int>(tail_byte / (blocksize / 2));
+            int group_id = block_id / group_size;
+            float real_absmax = (__half2float(absmax2[group_id]) * __half2float(code2[absmax_q[block_id]])) + offset;
+            output[num_elements - 1] = float_to_out<OutT>(s_LUT[packed >> 4] * real_absmax);
+        }
+    }
+}
+```
+
+同时 host 端的 grid 计算也要跟着改回按 total_bytes 来算，而不是按 total_words 算。因为现在一个线程对应一个 packed byte，不再是一个线程对应一个 uint4。
+
+这版的好处是题意完全对齐，线程粒度、处理粒度、写回粒度三者一致。缺点也很明显，性能会比之前那个“每线程吞 16 个 byte”的版本低一些。
+
+输出
+```cpp
+(cuda) ikko@dsw-607126-85f54bdf75-5lzlx:~/Learning-CUDA$ make nf4
+=== [NF4] Compiling nf4/mainla.cu ===
+TMPDIR=/home/ikko/Learning-CUDA/.tmp /usr/local/cuda/bin/nvcc -O3 -std=c++17 -arch=sm_80 nf4/mainla.cu -o nf4/mainla
+=== [NF4] Running nf4/mainla ===
+=== CUDA_VISIBLE_DEVICES=7 ===
+CUDA_VISIBLE_DEVICES=7 ./nf4/mainla
+SM count: 108, max active blocks/SM: 8, grid_x: 864
+Kernel Time: 1.95401 ms
+Effective Bandwidth (approx): 345.605 GB/s
+Speedup vs bitsandbytes: 0.636311x (ref 1.24336 ms)
+Bandwidth ratio vs bitsandbytes: 0.636309x (ref 543.14 GB/s)
+Output dtype: bf16
+Output written to nf4/data/output.bin
+=== [NF4] Verifying MAE ===
+CUDA_VISIBLE_DEVICES=7 python nf4/verify_mae.py
+=== Starting Verification ===
+Shape: 16384x16384, Blocksize: 64
+------------------------------
+MAE (Mean Absolute Error): 0.000017
+Max Error:                 0.031250
+------------------------------
+✅ PASS: MAE (0.000017) is within threshold (0.01)
+```
+
+
 ## nsys分析
 ```shell
 nsys profile --stats=true --force-overwrite=true -o nf4_profile ./nf4/main
@@ -482,7 +574,8 @@ SKIPPED: /home/ikko/Learning-CUDA/nf4/nsys_mainla_bf16.sqlite does not contain N
 ```
 ## ncu
 
-
+4090上ncu的结果
+见nf4/ncu_report.txt
 ## maca
 cd /data/Learning-CUDA && mxcc -O3 -std=c++17 nf4/mainla.maca -o nf4/mainla_maca
 ```cpp
@@ -645,3 +738,4 @@ mcError_t mcFree(void *ptr);
 19 errors generated when compiling for host.
 ```
 原来沐曦用的是mc而不是maca
+## 

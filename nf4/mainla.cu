@@ -123,7 +123,7 @@ __device__ __forceinline__ uint32_t pack_pair_to_u32<half>(float v1, float v2) {
 
 template <typename OutT>
 __global__ void nf4_decode_kernel(
-    const uint4* __restrict__ packed_weights,
+    const uint8_t* __restrict__ packed_weights,
     const uint8_t* __restrict__ absmax_q,
     const half* __restrict__ absmax2,
     const half* __restrict__ code2,
@@ -135,72 +135,34 @@ __global__ void nf4_decode_kernel(
 ) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t stride = gridDim.x * blockDim.x;
-    int64_t total_words = (num_elements + 31) / 32; 
+    int64_t total_bytes = (num_elements + 1) / 2;
+    int64_t full_pair_bytes = num_elements / 2;
 
     __shared__ float s_LUT[16];
     if (threadIdx.x < 16) {
         s_LUT[threadIdx.x] = NF4_LUT[threadIdx.x];
     }
     __syncthreads();
-    // 预将输出转为 uint4 指针，用于最后的 128-bit 存储
-    uint4* out_u4 = reinterpret_cast<uint4*>(output);
+    uint32_t* out_u32 = reinterpret_cast<uint32_t*>(output);
 
-    for (int64_t word_idx = tid; word_idx < total_words; word_idx += stride) {
-        // 1. 128-bit 一次性读取
-        uint4 pw = packed_weights[word_idx];
+    for (int64_t byte_idx = tid; byte_idx < full_pair_bytes; byte_idx += stride) {
+        uint8_t packed = packed_weights[byte_idx];
+        int block_id = static_cast<int>(byte_idx / (blocksize / 2));
+        int group_id = block_id / group_size;
+        float real_absmax = (__half2float(absmax2[group_id]) * __half2float(code2[absmax_q[block_id]])) + offset;
+        float v1 = s_LUT[packed >> 4] * real_absmax;
+        float v2 = s_LUT[packed & 0x0F] * real_absmax;
+        out_u32[byte_idx] = pack_pair_to_u32<OutT>(v1, v2);
+    }
 
-        // 2. 提前计算参数
-        int64_t base_byte = word_idx * 16;
-        int block_id = base_byte / (blocksize / 2);
-        float real_absmax = (__half2float(absmax2[block_id / group_size]) * __half2float(code2[absmax_q[block_id]])) + offset;
-
-        // 3. 定义 4 个 uint4 用于暂存结果（对应 32 个 bf16）
-        // uint4 res[4];
-        // 内部处理逻辑：分 4 组，每组处理 pw 的一个分量 (x, y, z, w)
-        auto decode_unit = [&](uint32_t w) -> uint4 {
-            uint4 local_res;
-            // 处理 w 中的 4 个字节，每个字节出 2 个 bf16，共 8 个 bf16 = 2 个 uint2 = 1 个 uint4
-            // 这里利用 bf162 指令优化
-            #pragma unroll // 编译时展开循环，减少分支和索引计算
-            for(int i=0; i<4; i++) {
-                uint8_t p = (w >> (i * 8)) & 0xFF;
-                float v1 = s_LUT[p >> 4] * real_absmax;
-                float v2 = s_LUT[p & 0x0F] * real_absmax;
-                // 直接合成 bf162 并转为 uint32，存入 uint4 的不同分量
-                uint32_t u32_val = pack_pair_to_u32<OutT>(v1, v2);
-                
-                if(i==0) local_res.x = u32_val;
-                else if(i==1) local_res.y = u32_val;
-                else if(i==2) local_res.z = u32_val;
-                else local_res.w = u32_val;
-            }
-            return local_res;
-        };
-
-        int64_t base_out = base_byte * 2;
-        if (base_out + 31 < num_elements) {// 边界检查
-            // 4. 真正并行化执行存储
-            out_u4[word_idx * 4 + 0] = decode_unit(pw.x);
-            out_u4[word_idx * 4 + 1] = decode_unit(pw.y);
-            out_u4[word_idx * 4 + 2] = decode_unit(pw.z);
-            out_u4[word_idx * 4 + 3] = decode_unit(pw.w);
-        } else {
-            uint32_t words[4] = {pw.x, pw.y, pw.z, pw.w};
-            #pragma unroll
-            for (int i = 0; i < 16; ++i) {
-                int64_t byte_idx = base_byte + i;
-                uint32_t w = words[i >> 2];
-                uint8_t p = static_cast<uint8_t>((w >> ((i & 3) * 8)) & 0xFF);
-                float v1 = s_LUT[p >> 4] * real_absmax;
-                float v2 = s_LUT[p & 0x0F] * real_absmax;
-                int64_t out_idx = byte_idx * 2;
-                if (out_idx < num_elements) {
-                    output[out_idx] = float_to_out<OutT>(v1);
-                }
-                if (out_idx + 1 < num_elements) {
-                    output[out_idx + 1] = float_to_out<OutT>(v2);
-                }
-            }
+    if ((num_elements & 1) != 0) {
+        int64_t tail_byte = total_bytes - 1;
+        if (tid == 0) {
+            uint8_t packed = packed_weights[tail_byte];
+            int block_id = static_cast<int>(tail_byte / (blocksize / 2));
+            int group_id = block_id / group_size;
+            float real_absmax = (__half2float(absmax2[group_id]) * __half2float(code2[absmax_q[block_id]])) + offset;
+            output[num_elements - 1] = float_to_out<OutT>(s_LUT[packed >> 4] * real_absmax);
         }
     }
 }
@@ -291,7 +253,7 @@ int main(int argc, char** argv) {
 
     infile.close();
     // 分配 device   内存
-    uint4* d_packed = nullptr;
+    uint8_t* d_packed = nullptr;
     uint8_t* d_absmax_q = nullptr;
     half* d_absmax2 = nullptr;
     half* d_code2 = nullptr;
@@ -317,7 +279,6 @@ int main(int argc, char** argv) {
 // 4. 启动 CUDA Kernel
     dim3 blockDim(256);
     int64_t total_bytes = (num_elements + 1) / 2;
-    int64_t total_words = (total_bytes + 15) / 16;
     int sm_count = 0;
     CHECK_CUDA(cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, 0));
     int max_active_blocks = 0;
@@ -335,7 +296,7 @@ int main(int argc, char** argv) {
             0));
     }
     int grid_x = sm_count * max_active_blocks;
-    int64_t max_grid = (total_words + blockDim.x - 1) / blockDim.x;
+    int64_t max_grid = (total_bytes + blockDim.x - 1) / blockDim.x;
     if (grid_x > max_grid) {
         grid_x = static_cast<int>(max_grid);
     }
