@@ -137,6 +137,8 @@ __global__ void nf4_decode_kernel(
     int64_t stride = gridDim.x * blockDim.x;
     int64_t total_bytes = (num_elements + 1) / 2;
     int64_t full_pair_bytes = num_elements / 2;
+    unsigned warp_mask = 0xffffffffu;
+    int lane = threadIdx.x & 31;
 
     __shared__ float s_LUT[16];
     if (threadIdx.x < 16) {
@@ -149,7 +151,12 @@ __global__ void nf4_decode_kernel(
         uint8_t packed = packed_weights[byte_idx];
         int block_id = static_cast<int>(byte_idx / (blocksize / 2));
         int group_id = block_id / group_size;
-        float real_absmax = (__half2float(absmax2[group_id]) * __half2float(code2[absmax_q[block_id]])) + offset;
+        float real_absmax = 0.0f;
+        if (lane == 0) {
+            uint8_t qa = absmax_q[block_id];
+            real_absmax = (__half2float(absmax2[group_id]) * __half2float(code2[qa])) + offset;
+        }
+        real_absmax = __shfl_sync(warp_mask, real_absmax, 0);
         float v1 = s_LUT[packed >> 4] * real_absmax;
         float v2 = s_LUT[packed & 0x0F] * real_absmax;
         out_u32[byte_idx] = pack_pair_to_u32<OutT>(v1, v2);

@@ -738,4 +738,14 @@ mcError_t mcFree(void *ptr);
 19 errors generated when compiling for host.
 ```
 原来沐曦用的是mc而不是maca
-## 
+## blocksize,group_size
+printf("group_size: %d,block_size: %d",group_size,blocksize);
+得到block_size: 64；group_size:256
+```cpp
+float real_absmax = 0.0f;
+        if (lane == 0) {
+            uint8_t qa = absmax_q[block_id];
+            real_absmax = (__half2float(absmax2[group_id]) * __half2float(code2[qa])) + offset;
+        }
+        real_absmax = __shfl_sync(warp_mask, real_absmax, 0);
+```
