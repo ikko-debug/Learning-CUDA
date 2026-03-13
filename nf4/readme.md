@@ -862,3 +862,28 @@ float real_absmax = 0.0f;
 可能被低估的成本
 	•	byte_idx / (blocksize / 2)
 	•	block_id / group_size
+
+## 由于A100显存占用
+最终在4090测试。
+结果：rows=16384, cols=16384, blocksize=64
+```shell
+./nf4/mainla 
+SM count: 128, max active blocks/SM: 6, grid_x: 768
+Kernel Time: 0.790252 ms
+Effective Bandwidth (approx): 854.559 GB/s
+Speedup vs bitsandbytes: 1.57337x (ref 1.24336 ms)
+Bandwidth ratio vs bitsandbytes: 1.57337x (ref 543.14 GB/s)
+Output dtype: bf16
+Output written to nf4/data/output.bin
+```
+rows=24576, cols=24576, blocksize=64
+```shell
+./nf4/mainla 
+SM count: 128, max active blocks/SM: 6, grid_x: 768
+Kernel Time: 1.77564 ms
+Effective Bandwidth (approx): 855.727 GB/s
+Speedup vs bitsandbytes: 0.700233x (ref 1.24336 ms)
+Bandwidth ratio vs bitsandbytes: 1.57552x (ref 543.14 GB/s)
+Output dtype: bf16
+Output written to nf4/data/output.bin
+```
