@@ -176,17 +176,17 @@ __global__ void nf4_decode_kernel(
 
 int main(int argc, char** argv) {
 //     1.输入解析，读取二进制文件
-    std::string input_file = "03_nf4_dequant/nf4/ikko/data/weight_data.bin";
-    std::string output_file = "03_nf4_dequant/nf4/ikko/data/output.bin";
+    std::string input_file = "03_nf4_dequant/ikko/data/weight_data.bin";
+    std::string output_file = "03_nf4_dequant/ikko/data/output.bin";
     enum class OutputType { BF16, FP16 };
     OutputType output_type = OutputType::BF16;
     if (argc >= 2) {
         if (std::strcmp(argv[1], "bf16") == 0) {
             output_type = OutputType::BF16;
-            output_file = "03_nf4_dequant/nf4/ikko/data/output_bf16.bin";
+            output_file = "03_nf4_dequant/ikko/data/output_bf16.bin";
         } else if (std::strcmp(argv[1], "fp16") == 0) {
             output_type = OutputType::FP16;
-            output_file = "03_nf4_dequant/nf4/ikko/data/output_fp16.bin";
+            output_file = "03_nf4_dequant/ikko/data/output_fp16.bin";
         } else {
             std::cerr << "Usage: " << argv[0] << " [bf16|fp16] [output_file]" << std::endl;
             return 1;
@@ -202,7 +202,7 @@ int main(int argc, char** argv) {
             std::cerr << "CWD: " << cwd << std::endl;
         }
         std::cerr << "Error: Cannot open input file: " << input_file << std::endl;
-        std::string fallback_file = "03_nf4_dequant/nf4/ikko/data/weight_data.bin";
+        std::string fallback_file = "03_nf4_dequant/ikko/data/weight_data.bin";
         infile.open(fallback_file, std::ios::binary);
         if (!infile) {
             std::cerr << "Error: Cannot open fallback input file: " << fallback_file << std::endl;

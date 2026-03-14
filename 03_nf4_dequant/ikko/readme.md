@@ -1,6 +1,29 @@
 ## 测试
+~/Learning-CUDA目录下
+
+```bash
+# 默认 bf16
 make nf4
+
+# 显式指定 dtype
+make nf4 DTYPE=fp16
+make nf4 DTYPE=bf16
+
+# 简写（等价于上面的 DTYPE）
+make nf4 fp16
+make nf4 bf16
+
+# 指定 GPU
 make nf4 CUDA_DEVICE=7
+make nf4 fp16 CUDA_DEVICE=7
+
+# 查看用法
+make help
+```
+
+说明：
+- `make nf4 fp16` 中的 `fp16` 是 Make 目标简写，Makefile 已兼容并自动映射为 `DTYPE=fp16`。
+- 运行阶段会传参给 `mainla`，输出路径随 dtype 自动切换到 `data/output_fp16.bin` 或默认 bf16 输出文件。
 ## NF4反量化
 权重 = NF4表值 × (一级scale × 二级scale) + offset
 scale = code2[ absmax_q[block] ] × absmax2[group]

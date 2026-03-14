@@ -4,7 +4,7 @@ import struct
 import os
 import numpy as np
 
-def generate_inputs(rows=16384, cols=16384, blocksize=64, output_dir="03_nf4_dequant/nf4/ikko/data", compute_type="bf16"):
+def generate_inputs(rows=16384, cols=16384, blocksize=64, output_dir="03_nf4_dequant/ikko/data", compute_type="bf16"):
     os.makedirs(output_dir, exist_ok=True)
     
     compute_type = compute_type.lower()

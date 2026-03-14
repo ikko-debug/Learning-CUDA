@@ -3,7 +3,7 @@ import numpy as np
 import os
 import struct
 
-def check_mae(output_dir="03_nf4_dequant/nf4/ikko/data", cuda_output_file="03_nf4_dequant/nf4/ikko/data/output.bin"):
+def check_mae(output_dir="03_nf4_dequant/ikko/data", cuda_output_file="03_nf4_dequant/ikko/data/output.bin"):
     truth_file = os.path.join(output_dir, "ground_truth.bin")
     input_file = os.path.join(output_dir, "weight_data.bin")
     

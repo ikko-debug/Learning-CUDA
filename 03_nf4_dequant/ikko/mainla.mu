@@ -91,8 +91,8 @@ __global__ void nf4_decode_kernel_fp16(
 }
 
 int main(int argc, char** argv) {
-    std::string input_file = "data/weight_data.bin";
-    std::string output_file = "data/output_fp16_mu.bin";
+    std::string input_file = "03_nf4_dequant/ikko/data/weight_data.bin";
+    std::string output_file = "03_nf4_dequant/ikko/output_fp16_mu.bin";
 
     if (argc >= 2) {
         if (std::strcmp(argv[1], "fp16") != 0) {
@@ -111,7 +111,7 @@ int main(int argc, char** argv) {
             std::cerr << "CWD: " << cwd << std::endl;
         }
         std::cerr << "Error: Cannot open input file: " << input_file << std::endl;
-        std::string fallback_file = "data/weight_data.bin";
+        std::string fallback_file = "03_nf4_dequant/ikko/data/weight_data.bin";
         infile.open(fallback_file, std::ios::binary);
         if (!infile) {
             std::cerr << "Error: Cannot open fallback input file: " << fallback_file << std::endl;
